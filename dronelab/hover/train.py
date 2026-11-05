@@ -1,7 +1,7 @@
 """Train a hover policy on PlanarQuadrotorEnv with PPO.
 
 Usage:
-    python train.py --updates 300 --out checkpoints/hover_mlp.pt
+    dronelab hover train --updates 300 --out checkpoints/hover_mlp.pt
 """
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import os
 import numpy as np
 import torch
 
-from drone_mi.env import PlanarQuadrotorEnv
-from drone_mi.policy import ActorCritic
+from dronelab.hover.env import PlanarQuadrotorEnv
+from dronelab.policy import ActorCritic
 
 
 def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
@@ -28,8 +28,9 @@ def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
     return adv, returns
 
 
-def main():
-    p = argparse.ArgumentParser()
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="dronelab hover train", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--updates", type=int, default=300)
     p.add_argument("--steps", type=int, default=2048, help="env steps per update")
     p.add_argument("--epochs", type=int, default=10)
@@ -37,7 +38,7 @@ def main():
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=str, default="checkpoints/hover_mlp.pt")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
