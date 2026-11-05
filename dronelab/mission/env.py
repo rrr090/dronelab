@@ -30,6 +30,7 @@ from dronelab.mission import maps as M
 from dronelab.cargo.env import (
     CARGO_MASS, DT, G, OBS_DIM, PAIRS, CargoEnv, Conditions,
 )
+from dronelab.cargo.testing import FormationController
 
 MISSION_OBS_DIM = OBS_DIM + 30
 LEAD = 1.0                 # reference may run at most this far ahead of the cargo [m]
@@ -46,6 +47,19 @@ LOCAL_REFRESH = 10            # steps between nearest-obstacle refreshes
 FAIL_REASONS = ["", "drone hit ground", "cargo hit ground", "drone flipped", "drones collided",
                 "out of bounds", "drone hit obstacle", "cargo destroyed"]
 DAMAGE_KINDS = ["rope jerk", "g-force", "impact", "rope rub"]
+
+_BASELINE = FormationController()
+
+
+def baseline_actions(obs: np.ndarray) -> np.ndarray:
+    """Formation baseline on mission observations (N, 93) -> (N, 12): follows the
+    moving route reference with velocity feedforward; ignores obstacles."""
+    return _BASELINE.act_batch(obs[:, :OBS_DIM], 2 * obs[:, OBS_DIM:OBS_DIM + 3])
+
+
+def compose_residual(obs: np.ndarray, correction: np.ndarray, scale: float) -> np.ndarray:
+    """Residual control: baseline action plus a bounded learned correction."""
+    return np.clip(baseline_actions(obs) + scale * np.clip(correction, -1, 1), -1, 1)
 
 
 def _pad(arr, n, width, far):
@@ -73,9 +87,13 @@ def speed_profile(path, cruise):
 class MissionEnv(CargoEnv):
     def __init__(self, num_envs: int = 1, seed: int | None = None, difficulty: float | None = None,
                  themes=None, maps=None, autoreset: bool = False, cruise: float | None = None,
-                 conditions: Conditions | None = None, pool_size: int = 40):
+                 conditions: Conditions | None = None, pool_size: int = 40, residual: float = 0.0):
         """Training: pass ``difficulty`` (0..1) to draw random maps and conditions.
-        Evaluation: pass ``maps`` (one MissionMap per env) and optionally ``conditions``."""
+        Evaluation: pass ``maps`` (one MissionMap per env) and optionally ``conditions``.
+        ``residual > 0``: actions are corrections added to the formation baseline,
+        scaled by ``residual`` (see ``compose_residual``)."""
+        self.residual = residual
+        self._obs = None
         self.fixed_maps = maps
         self.themes = themes or M.THEMES
         self.cruise_fixed = cruise
@@ -225,6 +243,8 @@ class MissionEnv(CargoEnv):
     # ------------------------------------------------------------ step
     def step(self, action):
         prev_s = self.s_proj.copy()
+        if self.residual > 0:
+            action = compose_residual(self._obs, np.asarray(action).reshape(self.B, -1), self.residual)
         a, _ = self._advance(action)
         self._advance_reference()
         B = self.B
@@ -285,7 +305,7 @@ class MissionEnv(CargoEnv):
                   - 2.0 * np.sum(np.maximum(0.5 - sep, 0), -1)
                   - 0.02 * np.mean(a.reshape(B, -1) ** 2, -1)
                   - 0.1 * np.mean((a.reshape(B, -1) - self.last_action) ** 2, -1)
-                  + 1.0 * (self.s_proj - prev_s) - 3.0 * self.step_damage - 1.0 * clear_pen)
+                  + 1.0 * (self.s_proj - prev_s) - 3.0 * self.step_damage - 3.0 * clear_pen)
         reward = reward - 30.0 * (fail > 0) + delivered * (20.0 + 80.0 * self.health / 100)
         self.last_action = a.reshape(B, -1)
         self.crash_code = fail
@@ -321,4 +341,5 @@ class MissionEnv(CargoEnv):
             self.v_ref / 2, *ahead, sense, np.minimum(rope_d, 3.0) / 3,
             self.health[:, None] / 100, ((self.path_len - self.s_proj) / 40)[:, None],
         ], -1)
-        return np.concatenate([base, extra.astype(np.float32)], -1)
+        self._obs = np.concatenate([base, extra.astype(np.float32)], -1)
+        return self._obs

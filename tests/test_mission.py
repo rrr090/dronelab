@@ -64,3 +64,14 @@ def test_mission_viewer_export(tmp_path):
     html = write_viewer(data, tmp_path / "m.html").read_text(encoding="utf-8")
     payload = html.split("const DATA = ", 1)[1].split(";\n", 1)[0]
     assert json.loads(payload)["meta"]["policies"] == ["FORMATION"]
+
+
+def test_residual_zero_correction_flies_the_baseline():
+    from dronelab.mission.env import baseline_actions
+    m = M.generate_map(4, "forest", 0.3)
+    a, b = MissionEnv(1, seed=0, maps=[m]), MissionEnv(1, seed=0, maps=[m], residual=0.3)
+    oa, ob = a.reset(), b.reset()
+    for _ in range(30):
+        oa = a.step(baseline_actions(oa))[0]
+        ob = b.step(np.zeros((1, ACT_DIM)))[0]
+    assert np.allclose(a.cp, b.cp) and np.allclose(oa, ob)

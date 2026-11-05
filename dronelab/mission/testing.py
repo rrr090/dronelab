@@ -14,7 +14,9 @@ import numpy as np
 from dronelab.cargo.env import DT, OBS_DIM
 from dronelab.cargo.testing import FormationController
 from dronelab.mission.maps import THEMES, MissionMap, generate_map
-from dronelab.mission.env import DAMAGE_KINDS, FAIL_REASONS, MissionEnv
+from dronelab.mission.env import (
+    DAMAGE_KINDS, FAIL_REASONS, MissionEnv, baseline_actions, compose_residual,
+)
 
 Policy = Callable[[np.ndarray], np.ndarray]
 EVAL_SEED = 5_000_000            # training maps use seeds below 1e6
@@ -147,6 +149,9 @@ class MissionFormationController(FormationController):
     def __call__(self, obs):
         return self._act(obs[:OBS_DIM], 2 * obs[OBS_DIM:OBS_DIM + 3])
 
+    def batched(self, O):
+        return baseline_actions(np.asarray(O))
+
 
 def load_mission_policy(path: str, deterministic: bool = True, device: str = "cpu") -> Policy:
     import torch
@@ -157,10 +162,14 @@ def load_mission_policy(path: str, deterministic: bool = True, device: str = "cp
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
 
+    residual = float(ckpt.get("residual", 0.0))
+
     @torch.no_grad()
     def batched(O):
-        mean, std, _ = model(torch.as_tensor(np.asarray(O), dtype=torch.float32))
-        return (mean if deterministic else torch.normal(mean, std)).numpy()
+        O = np.asarray(O)
+        mean, std, _ = model(torch.as_tensor(O, dtype=torch.float32))
+        a = (mean if deterministic else torch.normal(mean, std)).numpy()
+        return compose_residual(O, a, residual) if residual > 0 else a
 
     def policy(o):
         return batched(np.asarray(o)[None])[0]
