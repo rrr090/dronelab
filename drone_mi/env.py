@@ -36,7 +36,7 @@ class PlanarQuadrotorEnv:
             [
                 self.rng.uniform(-n, n),                 # x
                 TARGET_Z + self.rng.uniform(-n, n),      # z
-                self.rng.uniform(-0.2, 0.2),             # theta
+                self.rng.uniform(-n, n) * 0.7,           # theta (scaled by init_noise)
                 0.0, 0.0, 0.0,                           # vx, vz, omega
             ],
             dtype=np.float64,
