@@ -1,6 +1,6 @@
 import numpy as np
 
-from drone_mi.env import ACT_DIM, OBS_DIM, PlanarQuadrotorEnv, TARGET_Z
+from dronelab.hover.env import ACT_DIM, OBS_DIM, PlanarQuadrotorEnv, TARGET_Z
 
 
 def test_shapes():

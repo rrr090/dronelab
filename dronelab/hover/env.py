@@ -29,6 +29,11 @@ class PlanarQuadrotorEnv:
         self.init_noise = init_noise
         self.state = np.zeros(6, dtype=np.float64)
         self.t = 0
+        # Disturbance hooks used by dronelab.hover.testing. Defaults leave the
+        # training dynamics untouched.
+        self.ext_force = np.zeros(2)          # external (fx, fz) [N], e.g. wind
+        self.ext_torque = 0.0                 # external pitch torque [N m]
+        self.motor_gain = np.ones(ACT_DIM)    # per-motor thrust efficiency
 
     def reset(self) -> np.ndarray:
         n = self.init_noise
@@ -53,13 +58,13 @@ class PlanarQuadrotorEnv:
 
     def step(self, action: np.ndarray):
         a = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
-        thrusts = (a + 1.0) / 2.0 * MAX_THRUST
+        thrusts = (a + 1.0) / 2.0 * MAX_THRUST * self.motor_gain
         total = thrusts.sum()
-        torque = (thrusts[1] - thrusts[0]) * ARM
+        torque = (thrusts[1] - thrusts[0]) * ARM + self.ext_torque
 
         x, z, th, vx, vz, om = self.state
-        ax = -total * np.sin(th) / MASS
-        az = total * np.cos(th) / MASS - GRAVITY
+        ax = (-total * np.sin(th) + self.ext_force[0]) / MASS
+        az = (total * np.cos(th) + self.ext_force[1]) / MASS - GRAVITY
         alpha = torque / INERTIA
 
         vx += ax * DT

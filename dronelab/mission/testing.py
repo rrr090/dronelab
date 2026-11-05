@@ -1,0 +1,169 @@
+"""Evaluate cargo delivery missions on generated maps.
+
+Missions run batched (one env per map), so a whole suite flies in parallel.
+A policy is a callable ``obs (93,) -> action (12,)``; if it has a ``batched``
+attribute (``(B, 93) -> (B, 12)``), that is used instead.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Callable, Sequence
+
+import numpy as np
+
+from dronelab.cargo.env import DT, OBS_DIM
+from dronelab.cargo.testing import FormationController
+from dronelab.mission.maps import THEMES, MissionMap, generate_map
+from dronelab.mission.env import DAMAGE_KINDS, FAIL_REASONS, MissionEnv
+
+Policy = Callable[[np.ndarray], np.ndarray]
+EVAL_SEED = 5_000_000            # training maps use seeds below 1e6
+
+
+@dataclass
+class MissionResult:
+    map: MissionMap = field(repr=False)
+    delivered: bool
+    fail_reason: str               # "" if delivered, "timeout" if it ran out of time
+    health: float
+    score: float                   # health if delivered, else 0
+    time_s: float
+    damage: dict
+    mean_track_err: float
+    min_clearance: float
+    rec: dict | None = field(default=None, repr=False)
+
+
+def mission_maps(themes=None, difficulties=(0.5, 1.0), per=2, seed=EVAL_SEED):
+    """Unseen evaluation maps: every theme x difficulty, ``per`` maps each."""
+    out = []
+    for ti, th in enumerate(themes or THEMES):
+        for di, d in enumerate(difficulties):
+            for k in range(per):
+                out.append(generate_map(seed + 1000 * ti + 100 * di + k, th, d))
+    return out
+
+
+def _batched(policy):
+    if hasattr(policy, "batched"):
+        return policy.batched
+    return lambda O: np.stack([policy(o) for o in O])
+
+
+def run_missions(policy: Policy, maps: Sequence[MissionMap], cruise: float = 1.0,
+                 record: bool = False, seed: int = 0) -> list[MissionResult]:
+    B = len(maps)
+    env = MissionEnv(B, seed=seed, maps=list(maps), cruise=cruise)
+    obs = env.reset()
+    act = _batched(policy)
+    alive = np.ones(B, dtype=bool)
+    result = [None] * B
+    err_sum, min_clear, steps = np.zeros(B), np.full(B, np.inf), np.zeros(B, dtype=np.int64)
+    keys = ["dp", "dr", "cp", "ten", "thr", "cf", "hp", "ref", "hit", "dmg"]
+    rec = {k: [] for k in keys} if record else None
+
+    def snap():
+        rec["dp"].append(env.p.copy()); rec["dr"].append(env.R.copy()); rec["cp"].append(env.cp.copy())
+        rec["ten"].append(env.tension.copy()); rec["hp"].append(env.health.copy())
+        rec["ref"].append(env.target.copy())
+
+    if record:
+        snap()
+    while alive.any():
+        obs, r, term, trunc, info = env.step(act(obs))
+        dist = env._cache[0]
+        err_sum += env.cargo_error() * alive
+        min_clear = np.where(alive, np.minimum(min_clear, dist.min(-1)), min_clear)
+        steps += alive
+        if record:
+            snap()
+            rec["thr"].append(env.thrust.copy()); rec["cf"].append(env.cargo_force.copy())
+            rec["hit"].append(env.impact_event.copy()); rec["dmg"].append(env.step_damage.copy())
+        for i in np.nonzero(alive & (term | trunc))[0]:
+            alive[i] = False
+            delivered = bool(info["delivered"][i])
+            reason = "" if delivered else (FAIL_REASONS[info["fail"][i]] if term[i] else "timeout")
+            hp = float(env.health[i])
+            result[i] = MissionResult(
+                map=maps[i], delivered=delivered, fail_reason=reason, health=hp,
+                score=hp if delivered else 0.0, time_s=float(steps[i] * DT),
+                damage={k: float(v) for k, v in zip(DAMAGE_KINDS, env.damage[i])},
+                mean_track_err=float(err_sum[i] / steps[i]), min_clearance=float(min_clear[i]),
+            )
+    if record:
+        stacked = {k: np.array(v) for k, v in rec.items()}
+        for i, res in enumerate(result):
+            n = int(steps[i])
+            res.rec = {k: (v[: n + 1, i] if k in ("dp", "dr", "cp", "ten", "hp", "ref") else v[:n, i])
+                       for k, v in stacked.items()}
+    return result
+
+
+def summarize_missions(results: Sequence[MissionResult]) -> dict:
+    fails = {}
+    for r in results:
+        if not r.delivered:
+            fails[r.fail_reason] = fails.get(r.fail_reason, 0) + 1
+    dl = [r for r in results if r.delivered]
+    return {
+        "missions": len(results),
+        "delivered_rate": float(np.mean([r.delivered for r in results])),
+        "mean_score": float(np.mean([r.score for r in results])),
+        "health_if_delivered": float(np.mean([r.health for r in dl])) if dl else float("nan"),
+        "mean_time_s": float(np.mean([r.time_s for r in dl])) if dl else float("nan"),
+        "mean_track_err": float(np.mean([r.mean_track_err for r in results])),
+        "damage": {k: float(np.mean([r.damage[k] for r in results])) for k in DAMAGE_KINDS},
+        "failures": fails,
+    }
+
+
+def format_mission_table(results: Sequence[MissionResult]) -> str:
+    groups = {}
+    for r in results:
+        groups.setdefault(r.map.theme, []).append(r)
+    groups["ALL"] = list(results)
+    head = (f"{'theme':<8}{'delivered':>10}{'score':>8}{'health':>8}{'time s':>8}{'track':>7}"
+            f"{'jerk':>7}{'g':>6}{'impact':>8}{'rub':>6}  failures")
+    lines = [head, "-" * (len(head) + 12)]
+    for name, rs in groups.items():
+        s = summarize_missions(rs)
+        d = s["damage"]
+        why = ", ".join(f"{k} x{v}" for k, v in s["failures"].items())
+        if name == "ALL":
+            lines.append("-" * (len(head) + 12))
+        lines.append(
+            f"{name:<8}{s['delivered_rate']:>10.0%}{s['mean_score']:>8.1f}{s['health_if_delivered']:>8.1f}"
+            f"{s['mean_time_s']:>8.1f}{s['mean_track_err']:>7.2f}{d['rope jerk']:>7.1f}{d['g-force']:>6.1f}"
+            f"{d['impact']:>8.1f}{d['rope rub']:>6.1f}  {why}")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ policies
+
+class MissionFormationController(FormationController):
+    """The formation baseline, following the moving route reference with velocity feedforward.
+    It does not look at obstacles; it relies on the planned route's clearance."""
+
+    def __call__(self, obs):
+        return self._act(obs[:OBS_DIM], 2 * obs[OBS_DIM:OBS_DIM + 3])
+
+
+def load_mission_policy(path: str, deterministic: bool = True, device: str = "cpu") -> Policy:
+    import torch
+    from dronelab.policy import ActorCritic
+
+    ckpt = torch.load(path, map_location=device)
+    model = ActorCritic(**ckpt["config"])
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    @torch.no_grad()
+    def batched(O):
+        mean, std, _ = model(torch.as_tensor(np.asarray(O), dtype=torch.float32))
+        return (mean if deterministic else torch.normal(mean, std)).numpy()
+
+    def policy(o):
+        return batched(np.asarray(o)[None])[0]
+
+    policy.batched, policy.model = batched, model
+    return policy
