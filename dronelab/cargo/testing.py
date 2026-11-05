@@ -199,27 +199,33 @@ class FormationController:
 
     def _act(self, obs: np.ndarray, v_ref: np.ndarray) -> np.ndarray:
         """v_ref: velocity of the (possibly moving) cargo target, used as feedforward."""
-        e_c, cv = obs[0:3], 2 * obs[3:6] - v_ref
-        d = obs[6:].reshape(N_DRONES, OBS_PER_DRONE)
-        rel, v, R, ten = d[:, 0:3], 2 * d[:, 3:6], d[:, 6:15].reshape(3, 3, 3), 10 * d[:, 18]
-        q = rel + e_c                                   # drone position relative to target
-        shift = np.array([1.0, 1.0, 0.0]) * (-self.k_cargo * e_c - self.k_swing * cv)
-        shift[2] = -self.kz_cargo * e_c[2]
-        q_des = self.slots + shift
-        acc = self.kp * (q_des - q) - self.kd * (v - v_ref)
-        u = rel / np.linalg.norm(rel, axis=1, keepdims=True)
-        F = DRONE_MASS * (acc + np.array([0, 0, G])) + np.maximum(ten, 0)[:, None] * u
-        out = np.zeros((N_DRONES, ACT_PER_DRONE))
-        for i in range(N_DRONES):
-            psi = np.arctan2(R[i, 1, 0], R[i, 0, 0])
-            c, s = np.cos(psi), np.sin(psi)
-            fx, fy = c * F[i, 0] + s * F[i, 1], -s * F[i, 0] + c * F[i, 1]
-            n = np.linalg.norm(F[i])
-            roll = np.arcsin(np.clip(-fy / n, -1, 1))
-            pitch = np.arctan2(fx, F[i, 2])
-            out[i] = [F[i] @ R[i, :, 2] / F_HOVER_NOM - 1.0, roll / MAX_TILT_CMD,
-                      pitch / MAX_TILT_CMD, -2.0 * psi / MAX_YAW_RATE]
-        return np.clip(out.reshape(-1), -1, 1)
+        return self.act_batch(np.asarray(obs)[None], np.asarray(v_ref)[None])[0]
+
+    def act_batch(self, obs: np.ndarray, v_ref: np.ndarray) -> np.ndarray:
+        """Vectorised controller: obs (N, 63), v_ref (N, 3) -> actions (N, 12)."""
+        N = len(obs)
+        e_c, cv = obs[:, 0:3], 2 * obs[:, 3:6] - v_ref
+        d = obs[:, 6:6 + N_DRONES * OBS_PER_DRONE].reshape(N, N_DRONES, OBS_PER_DRONE)
+        rel, v = d[..., 0:3], 2 * d[..., 3:6]
+        R, ten = d[..., 6:15].reshape(N, N_DRONES, 3, 3), 10 * d[..., 18]
+        q = rel + e_c[:, None]                          # drone position relative to target
+        shift = np.zeros((N, 3))
+        shift[:, :2] = -self.k_cargo * e_c[:, :2] - self.k_swing * cv[:, :2]
+        shift[:, 2] = -self.kz_cargo * e_c[:, 2]
+        q_des = self.slots[None] + shift[:, None]
+        acc = self.kp * (q_des - q) - self.kd * (v - v_ref[:, None])
+        u = rel / np.linalg.norm(rel, axis=-1, keepdims=True)
+        F = DRONE_MASS * (acc + np.array([0, 0, G])) + np.maximum(ten, 0)[..., None] * u
+        psi = np.arctan2(R[..., 1, 0], R[..., 0, 0])
+        c, s = np.cos(psi), np.sin(psi)
+        fx, fy = c * F[..., 0] + s * F[..., 1], -s * F[..., 0] + c * F[..., 1]
+        n = np.linalg.norm(F, axis=-1)
+        roll = np.arcsin(np.clip(-fy / n, -1, 1))
+        pitch = np.arctan2(fx, F[..., 2])
+        thrust = np.einsum("ndk,ndk->nd", F, R[..., :, 2]) / F_HOVER_NOM - 1.0
+        out = np.stack([thrust, roll / MAX_TILT_CMD, pitch / MAX_TILT_CMD,
+                        -2.0 * psi / MAX_YAW_RATE], -1)
+        return np.clip(out.reshape(N, -1), -1, 1)
 
 
 def load_cargo_policy(path: str, deterministic: bool = True, device: str = "cpu") -> Policy:

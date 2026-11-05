@@ -44,12 +44,14 @@ def save(model, path, extra=None):
 def train_ppo(args, env, obs_dim: int, act_dim: int,
               eval_fn: Callable[[ActorCritic, torch.device], str] | None = None,
               episode_stat: Callable[[dict, int], dict] | None = None,
-              model_init: Callable[[ActorCritic], None] | None = None):
+              model_init: Callable[[ActorCritic], None] | None = None,
+              save_extra: dict | None = None):
     """Train with PPO. ``env`` is a batched env with a ``difficulty`` attribute.
 
     ``eval_fn(model, device)`` returns a one-line report, run every --eval-every.
     ``episode_stat(info, i)`` extracts extra per-episode stats when env i finishes.
     ``model_init(model)`` can warm-start a fresh model (ignored with --resume).
+    ``save_extra`` is stored in every checkpoint (e.g. how to interpret the actions).
     """
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -157,7 +159,7 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
             model.eval()
             print("   eval  " + eval_fn(model, device), flush=True)
             model.train()
-            save(model, args.out, {"update": update})
-    save(model, args.out, {"update": args.updates})
+            save(model, args.out, {"update": update, **(save_extra or {})})
+    save(model, args.out, {"update": args.updates, **(save_extra or {})})
     print(f"saved {args.out}")
     return model

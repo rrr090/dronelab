@@ -8,9 +8,16 @@ Reward: follow the route reference, make progress, keep clear of obstacles,
 fly smoothly, and above all avoid cargo damage. Delivery pays a bonus that
 scales with the cargo health left.
 
+Residual mode (default): the formation baseline keeps flying the route, and the
+network only outputs a bounded correction on top of it (``--residual`` sets the
+size). The correction starts near zero, so training starts from the baseline's
+performance instead of from scratch. ``--residual 0`` trains a policy that
+outputs the full action, warm-started from the cargo network.
+
 Usage:
-    dronelab mission train                       # default 600 updates
-    dronelab mission train --updates 1000
+    dronelab mission train                       # residual, default 400 updates
+    dronelab mission train --updates 600
+    dronelab mission train --residual 0 --init-from checkpoints/cargo_mlp.pt
     dronelab mission train --resume checkpoints/mission_mlp.pt --updates 300
 """
 from __future__ import annotations
@@ -21,18 +28,19 @@ import numpy as np
 import torch
 
 from dronelab.cargo.env import ACT_DIM
-from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv
+from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv, compose_residual
 from dronelab.mission.testing import mission_maps, run_missions, summarize_missions
 from dronelab.ppo import add_ppo_args, train_ppo
 
 
-def make_eval():
-    maps = mission_maps(difficulties=(0.6,), per=1, seed=4_000_000)   # 5 maps, one per theme
+def make_eval(residual=0.0):
+    maps = mission_maps(difficulties=(0.6, 1.0), per=1, seed=4_000_000)   # 10 maps, 2 per theme
 
     def quick_eval(model, device):
         @torch.no_grad()
         def batched(O):
-            return model(torch.as_tensor(O, device=device))[0].cpu().numpy()
+            a = model(torch.as_tensor(O, device=device))[0].cpu().numpy()
+            return compose_residual(O, a, residual) if residual > 0 else a
 
         class P:
             pass
@@ -80,6 +88,17 @@ def warm_start_from(path, init_std=0.12):
     return init
 
 
+def zero_correction(init_std):
+    """Residual start: the correction is exactly zero, so the first rollouts fly
+    the baseline, with small exploration noise around it."""
+    @torch.no_grad()
+    def init(model):
+        model.actor_mean.weight.zero_()
+        model.actor_mean.bias.zero_()
+        model.actor_log_std.fill_(float(np.log(init_std)))
+    return init
+
+
 def episode_stat(info, i):
     return {"delivered": float(info["delivered"][i]), "health": float(info["health"][i])}
 
@@ -87,16 +106,30 @@ def episode_stat(info, i):
 def main(argv=None):
     p = add_ppo_args(argparse.ArgumentParser(prog="dronelab mission train", description=__doc__,
                                              formatter_class=argparse.RawDescriptionHelpFormatter), out="checkpoints/mission_mlp.pt",
-                     updates=600, eval_every=50, hidden=128, lr=1.5e-4, ent_coef=0.0005,
+                     updates=400, eval_every=25, hidden=128, lr=1.5e-4, ent_coef=0.0005,
                      critic_warmup=10)
-    p.add_argument("--init-from", default="checkpoints/cargo_mlp.pt",
-                   help="warm-start from a trained cargo network ('' to train from scratch)")
-    p.add_argument("--init-std", type=float, default=0.12, help="exploration noise after warm start")
+    p.add_argument("--residual", type=float, default=0.3,
+                   help="size of the learned correction on top of the baseline (0 = full actions)")
+    p.add_argument("--init-from", default="",
+                   help="warm-start a full-action policy from a trained cargo network")
+    p.add_argument("--init-std", type=float, default=None,
+                   help="initial exploration noise (default 0.2 residual, 0.12 warm start)")
     args = p.parse_args(argv)
-    env = MissionEnv(args.envs, seed=args.seed, difficulty=0.0, autoreset=True)
-    init = warm_start_from(args.init_from, args.init_std) if args.init_from and not args.resume else None
-    train_ppo(args, env, MISSION_OBS_DIM, ACT_DIM, eval_fn=make_eval(),
-              episode_stat=episode_stat, model_init=init)
+    if args.resume:
+        args.residual = float(torch.load(args.resume, map_location="cpu").get("residual", 0.0))
+    env = MissionEnv(args.envs, seed=args.seed, difficulty=0.0, autoreset=True, residual=args.residual)
+    if args.resume:
+        init = None
+    elif args.residual > 0:
+        init = zero_correction(args.init_std or 0.2)
+    elif args.init_from:
+        init = warm_start_from(args.init_from, args.init_std or 0.12)
+    else:
+        init = None
+    print(f"mode: {'residual x%.2f' % args.residual if args.residual > 0 else 'full actions'}")
+    train_ppo(args, env, MISSION_OBS_DIM, ACT_DIM, eval_fn=make_eval(args.residual),
+              episode_stat=episode_stat, model_init=init,
+              save_extra={"residual": args.residual})
 
 
 if __name__ == "__main__":
