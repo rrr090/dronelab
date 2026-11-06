@@ -33,6 +33,8 @@ def add_ppo_args(p: argparse.ArgumentParser, **defaults):
     p.add_argument("--resume", default=None)
     p.add_argument("--out", default=defaults["out"])
     p.add_argument("--device", default="auto")
+    p.add_argument("--threads", type=int, default=0,
+                   help="CPU threads for PyTorch, useful when running seeds side by side (0 = default)")
     return p
 
 
@@ -53,6 +55,8 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
     ``model_init(model)`` can warm-start a fresh model (ignored with --resume).
     ``save_extra`` is stored in every checkpoint (e.g. how to interpret the actions).
     """
+    if args.threads > 0:
+        torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     device = torch.device(("cuda" if torch.cuda.is_available() else "cpu")
