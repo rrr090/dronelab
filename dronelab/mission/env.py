@@ -21,6 +21,10 @@ error measured from the moving reference), plus reference velocity (3),
 two lookahead route points relative to the cargo (6), for each drone and the
 cargo the obstacle distance and direction (16), obstacle distance at each
 rope midpoint (3), cargo health (1) and route distance remaining (1).
+
+With ``history=True``, HISTORY_DIM more inputs follow: the peak rope tensions
+within the last step (3), which is what causes damage, then rope tension, cargo
+velocity and cargo offset from the team centre as they were HISTORY_LAGS steps ago.
 """
 from __future__ import annotations
 
@@ -33,6 +37,10 @@ from dronelab.cargo.env import (
 from dronelab.cargo.testing import FormationController
 
 MISSION_OBS_DIM = OBS_DIM + 30
+HISTORY_LAGS = (5, 15, 30)   # steps back: 0.1, 0.3 and 0.6 s, against a swing period near 2 s
+HISTORY_FEATURES = 9
+HISTORY_DIM = 3 + HISTORY_FEATURES * len(HISTORY_LAGS)
+JERK_WARNING = 1.5         # peak tension / T0 where the optional early penalty starts; damage starts at 2
 LEAD = 1.0                 # reference may run at most this far ahead of the cargo [m]
 A_LAT = 0.6                # max lateral accel in turns for the reference [m/s^2]
 A_DEC = 0.35               # braking before the goal [m/s^2]
@@ -87,12 +95,18 @@ def speed_profile(path, cruise):
 class MissionEnv(CargoEnv):
     def __init__(self, num_envs: int = 1, seed: int | None = None, difficulty: float | None = None,
                  themes=None, maps=None, autoreset: bool = False, cruise: float | None = None,
-                 conditions: Conditions | None = None, pool_size: int = 40, residual: float = 0.0):
+                 conditions: Conditions | None = None, pool_size: int = 40, residual: float = 0.0,
+                 history: bool = False, jerk_weight: float = 0.0):
         """Training: pass ``difficulty`` (0..1) to draw random maps and conditions.
         Evaluation: pass ``maps`` (one MissionMap per env) and optionally ``conditions``.
         ``residual > 0``: actions are corrections added to the formation baseline,
-        scaled by ``residual`` (see ``compose_residual``)."""
+        scaled by ``residual`` (see ``compose_residual``).
+        ``history``: add the HISTORY_DIM inputs described at the top of this file.
+        ``jerk_weight``: penalise rope tension above JERK_WARNING, before it does damage."""
         self.residual = residual
+        self.history, self.jerk_weight = history, jerk_weight
+        self.past = np.zeros((num_envs, max(HISTORY_LAGS) + 1, HISTORY_FEATURES))
+        self.past_i = 0
         self._obs = None
         self.fixed_maps = maps
         self.themes = themes or M.THEMES
@@ -174,6 +188,8 @@ class MissionEnv(CargoEnv):
         self.step_damage[idx] = 0; self.impact_event[idx] = False
         self._refresh_local(idx)
         self._cache = None
+        self.tension_peak[idx] = self.tension[idx]
+        self.past[idx] = self._history_features()[idx, None]
         return self.observe()
 
     def _refresh_local(self, idx=None):
@@ -186,6 +202,10 @@ class MissionEnv(CargoEnv):
         ib = np.argsort(db, axis=1)[:, :NB_LOCAL]
         self.cyl_l[idx] = np.take_along_axis(self.cyl[idx], ic[..., None], 1)
         self.box_l[idx] = np.take_along_axis(self.box[idx], ib[..., None], 1)
+
+    # ------------------------------------------------------------ history
+    def _history_features(self):
+        return np.concatenate([self.tension / 10, self.cv / 2, self.cp - self.p.mean(1)], -1)
 
     # ------------------------------------------------------------ wind zones
     def _zone_wind(self, bodies):
@@ -260,6 +280,7 @@ class MissionEnv(CargoEnv):
         # --- cargo damage
         T0 = self.cargo_mass * G / 3 * 1.2
         jerk = 0.4 * np.sum(np.maximum(self.tension_peak / T0[:, None] - 2.0, 0), -1)
+        jerk_warning = np.sum(np.maximum(self.tension_peak / T0[:, None] - JERK_WARNING, 0), -1)
         acc = np.linalg.norm(self.cv - self.prev_cv, axis=-1) / DT
         gforce = 0.5 * np.maximum(acc / G - 0.8, 0)
         touching = dist[:, 3] < CARGO_R
@@ -306,9 +327,13 @@ class MissionEnv(CargoEnv):
                   - 0.02 * np.mean(a.reshape(B, -1) ** 2, -1)
                   - 0.1 * np.mean((a.reshape(B, -1) - self.last_action) ** 2, -1)
                   + 1.0 * (self.s_proj - prev_s) - 3.0 * self.step_damage - 3.0 * clear_pen)
+        reward = reward - self.jerk_weight * jerk_warning
         reward = reward - 30.0 * (fail > 0) + delivered * (20.0 + 80.0 * self.health / 100)
         self.last_action = a.reshape(B, -1)
         self.crash_code = fail
+
+        self.past_i = (self.past_i + 1) % self.past.shape[1]
+        self.past[:, self.past_i] = self._history_features()
 
         terminated = (fail > 0) | delivered
         truncated = (self.t >= self.time_limit) & ~terminated
@@ -342,4 +367,8 @@ class MissionEnv(CargoEnv):
             self.health[:, None] / 100, ((self.path_len - self.s_proj) / 40)[:, None],
         ], -1)
         self._obs = np.concatenate([base, extra.astype(np.float32)], -1)
+        if self.history:
+            n = self.past.shape[1]
+            lagged = [self.past[:, (self.past_i - lag) % n] for lag in HISTORY_LAGS]
+            self._obs = np.concatenate([self._obs, self.tension_peak / 10, *lagged], -1).astype(np.float32)
         return self._obs
