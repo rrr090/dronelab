@@ -23,6 +23,8 @@ Usage:
     dronelab mission train --updates 600
     dronelab mission train --residual 0 --init-from checkpoints/cargo_mlp.pt
     dronelab mission train --resume checkpoints/mission_mlp.pt --updates 300
+    dronelab mission train --history --jerk-weight 1.0   # past frames as inputs, early jerk penalty
+    dronelab mission train --resume checkpoints/chosen.pt --curriculum 0 --critic-warmup 0 --lr 5e-5
 """
 from __future__ import annotations
 
@@ -33,14 +35,14 @@ import numpy as np
 import torch
 
 from dronelab.cargo.env import ACT_DIM
-from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv, compose_residual
+from dronelab.mission.env import HISTORY_DIM, MISSION_OBS_DIM, MissionEnv, compose_residual
 from dronelab.mission.testing import mission_maps, run_missions, summarize_missions
 from dronelab.ppo import add_ppo_args, save, train_ppo
 
 VALIDATION_SEED = 4_000_000      # between the training (< 1e6) and test (5e6) map seeds
 
 
-def make_eval(residual=0.0, best_path=None, maps=None):
+def make_eval(residual=0.0, best_path=None, maps=None, history=False, extra=None):
     maps = maps or mission_maps(difficulties=(0.5, 1.0), per=3, seed=VALIDATION_SEED)   # 30 maps
     best = -np.inf
 
@@ -53,13 +55,13 @@ def make_eval(residual=0.0, best_path=None, maps=None):
 
         class P:
             pass
-        pol = P(); pol.batched = batched
+        pol = P(); pol.batched = batched; pol.history = history
         s = summarize_missions(run_missions(pol, maps))
         fails = ", ".join(f"{k} x{v}" for k, v in s["failures"].items()) or "none"
         improved = best_path is not None and s["mean_score"] > best
         if improved:
             best = s["mean_score"]
-            save(model, best_path, {"residual": residual, "validation_score": best})
+            save(model, best_path, {"residual": residual, "validation_score": best, **(extra or {})})
         return (f"delivered {s['delivered_rate']:.0%} | score {s['mean_score']:.1f} "
                 f"| health {s['health_if_delivered']:.1f} | failures: {fails}"
                 + (" | new best" if improved else ""))
@@ -128,10 +130,21 @@ def main(argv=None):
                    help="warm-start a full-action policy from a trained cargo network")
     p.add_argument("--init-std", type=float, default=None,
                    help="initial exploration noise (default 0.2 residual, 0.12 warm start)")
+    p.add_argument("--history", action="store_true",
+                   help="add peak rope tension and past frames to the inputs")
+    p.add_argument("--jerk-weight", type=float, default=None,
+                   help="extra penalty on rope tension approaching the damage level "
+                        "(default 0, or the value saved in the --resume checkpoint)")
     args = p.parse_args(argv)
     if args.resume:
-        args.residual = float(torch.load(args.resume, map_location="cpu").get("residual", 0.0))
-    env = MissionEnv(args.envs, seed=args.seed, difficulty=0.0, autoreset=True, residual=args.residual)
+        ckpt = torch.load(args.resume, map_location="cpu")
+        args.residual = float(ckpt.get("residual", 0.0))
+        args.history = ckpt["config"]["obs_dim"] > MISSION_OBS_DIM
+        if args.jerk_weight is None:
+            args.jerk_weight = float(ckpt.get("jerk_weight", 0.0))
+    args.jerk_weight = args.jerk_weight or 0.0
+    env = MissionEnv(args.envs, seed=args.seed, difficulty=0.0, autoreset=True, residual=args.residual,
+                     history=args.history, jerk_weight=args.jerk_weight)
     if args.resume:
         init = None
     elif args.residual > 0:
@@ -142,9 +155,12 @@ def main(argv=None):
         init = None
     print(f"mode: {'residual x%.2f' % args.residual if args.residual > 0 else 'full actions'}")
     best_path = "{}_best{}".format(*os.path.splitext(args.out))
-    train_ppo(args, env, MISSION_OBS_DIM, ACT_DIM, eval_fn=make_eval(args.residual, best_path),
+    extra = {"jerk_weight": args.jerk_weight}
+    obs_dim = MISSION_OBS_DIM + (HISTORY_DIM if args.history else 0)
+    train_ppo(args, env, obs_dim, ACT_DIM,
+              eval_fn=make_eval(args.residual, best_path, history=args.history, extra=extra),
               episode_stat=episode_stat, model_init=init,
-              save_extra={"residual": args.residual})
+              save_extra={"residual": args.residual, **extra})
 
 
 if __name__ == "__main__":

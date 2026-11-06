@@ -15,7 +15,7 @@ from dronelab.cargo.env import DT, OBS_DIM
 from dronelab.cargo.testing import FormationController
 from dronelab.mission.maps import THEMES, MissionMap, generate_map
 from dronelab.mission.env import (
-    DAMAGE_KINDS, FAIL_REASONS, MissionEnv, baseline_actions, compose_residual,
+    DAMAGE_KINDS, FAIL_REASONS, MISSION_OBS_DIM, MissionEnv, baseline_actions, compose_residual,
 )
 
 Policy = Callable[[np.ndarray], np.ndarray]
@@ -33,6 +33,7 @@ class MissionResult:
     damage: dict
     mean_track_err: float
     min_clearance: float
+    steps: int = 0
     rec: dict | None = field(default=None, repr=False)
 
 
@@ -55,7 +56,7 @@ def _batched(policy):
 def run_missions(policy: Policy, maps: Sequence[MissionMap], cruise: float = 1.0,
                  record: bool = False, seed: int = 0) -> list[MissionResult]:
     B = len(maps)
-    env = MissionEnv(B, seed=seed, maps=list(maps), cruise=cruise)
+    env = MissionEnv(B, seed=seed, maps=list(maps), cruise=cruise, history=getattr(policy, "history", False))
     obs = env.reset()
     act = _batched(policy)
     alive = np.ones(B, dtype=bool)
@@ -91,6 +92,7 @@ def run_missions(policy: Policy, maps: Sequence[MissionMap], cruise: float = 1.0
                 score=hp if delivered else 0.0, time_s=float(steps[i] * DT),
                 damage={k: float(v) for k, v in zip(DAMAGE_KINDS, env.damage[i])},
                 mean_track_err=float(err_sum[i] / steps[i]), min_clearance=float(min_clear[i]),
+                steps=int(steps[i]),
             )
     if record:
         stacked = {k: np.array(v) for k, v in rec.items()}
@@ -233,4 +235,5 @@ def load_mission_policy(path: str, deterministic: bool = True, device: str = "cp
         return batched(np.asarray(o)[None])[0]
 
     policy.batched, policy.model = batched, model
+    policy.history = model.config["obs_dim"] > MISSION_OBS_DIM
     return policy
