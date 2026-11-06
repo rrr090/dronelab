@@ -1,15 +1,20 @@
 import json
 
 import numpy as np
+import torch
 
 from types import SimpleNamespace
 
 from dronelab.mission import maps as M
-from dronelab.cargo.env import ACT_DIM
-from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv
-from dronelab.mission.testing import (
-    MissionFormationController, MissionResult, bootstrap_ci, compare_to_baseline, run_missions,
+from dronelab.cargo.env import ACT_DIM, CARGO_MASS, G
+from dronelab.mission.env import (
+    HISTORY_DIM, HISTORY_FEATURES, HISTORY_LAGS, JERK_WARNING, MISSION_OBS_DIM, MissionEnv,
 )
+from dronelab.mission.testing import (
+    MissionFormationController, MissionResult, bootstrap_ci, compare_to_baseline, load_mission_policy,
+    run_missions,
+)
+from dronelab.policy import ActorCritic
 from dronelab.mission.site import median_seed, pick_showcase
 from dronelab.mission.viewer import build_viewer_data, write_viewer
 
@@ -185,3 +190,85 @@ def test_training_keeps_the_best_validation_checkpoint(tmp_path):
 
     best.unlink()
     assert "new best" not in quick_eval(model, "cpu") and not best.exists()   # same score is no gain
+
+
+def history_env():
+    return MissionEnv(2, seed=0, maps=[M.generate_map(1, "forest", 0.3), M.generate_map(2, "city", 0.3)],
+                      history=True)
+
+
+def test_history_inputs_only_extend_the_observation():
+    a = MissionEnv(1, seed=0, maps=[M.generate_map(1, "forest", 0.3)])
+    b = MissionEnv(1, seed=0, maps=[M.generate_map(1, "forest", 0.3)], history=True)
+    oa, ob = a.reset(), b.reset()
+    assert ob.shape == (1, MISSION_OBS_DIM + HISTORY_DIM)
+    for _ in range(40):
+        oa, ob = a.step(np.zeros((1, ACT_DIM)))[0], b.step(np.zeros((1, ACT_DIM)))[0]
+    assert np.array_equal(oa, ob[:, :MISSION_OBS_DIM])
+
+
+def test_history_shows_the_state_from_each_lag():
+    env = history_env()
+    env.reset()
+    states = [env._history_features().copy()]
+    for _ in range(max(HISTORY_LAGS) + 3):
+        obs = env.step(np.zeros((2, ACT_DIM)))[0]
+        states.append(env._history_features().copy())
+    assert np.allclose(obs[:, MISSION_OBS_DIM:MISSION_OBS_DIM + 3], env.tension_peak / 10, atol=1e-6)
+    for n, lag in enumerate(HISTORY_LAGS):
+        start = MISSION_OBS_DIM + 3 + n * HISTORY_FEATURES
+        assert np.allclose(obs[:, start:start + HISTORY_FEATURES], states[-1 - lag], atol=1e-6)
+
+
+def test_reset_clears_history_for_that_env_only():
+    env = history_env()
+    env.reset()
+    for _ in range(40):
+        env.step(np.zeros((2, ACT_DIM)))
+    kept = env.past[1].copy()
+    env.reset(np.array([0]))
+    assert np.allclose(env.past[0], env._history_features()[0])
+    assert np.array_equal(env.past[1], kept)
+
+
+def test_jerk_weight_only_penalises_tension_above_the_warning_level():
+    def reward(weight, spike):
+        env = MissionEnv(1, seed=0, maps=[M.generate_map(1, "forest", 0.3)], jerk_weight=weight)
+        env.reset()
+        original = env._advance
+
+        def advance(action):
+            out = original(action)
+            env.tension_peak[:] = spike
+            return out
+        env._advance = advance
+        return env.step(np.zeros((1, ACT_DIM)))[1][0]
+
+    assert reward(1.0, 0.0) == reward(0.0, 0.0)
+    high = 1.8 * env_t0()                # above the warning, below the damage level
+    assert np.isclose(reward(0.0, high) - reward(1.0, high), 3 * (1.8 - JERK_WARNING))
+
+
+def env_t0():
+    return CARGO_MASS * G / 3 * 1.2
+
+
+def test_saved_history_policy_flies_with_the_right_inputs(tmp_path):
+    model = ActorCritic(hidden=8, obs_dim=MISSION_OBS_DIM + HISTORY_DIM, act_dim=ACT_DIM, obs_norm=True)
+    path = tmp_path / "h.pt"
+    torch.save({"config": model.config, "state_dict": model.state_dict(), "residual": 0.1}, path)
+    policy = load_mission_policy(str(path))
+    assert policy.history
+    assert run_missions(policy, [M.generate_map(9, "storm", 0.0)])[0].steps > 0
+
+
+def test_resume_keeps_history_and_jerk_weight(tmp_path, monkeypatch):
+    from dronelab.mission import train
+    monkeypatch.setattr(train, "make_eval", lambda *a, **k: None)
+    tiny = ["--updates", "1", "--envs", "2", "--steps", "8", "--hidden", "8", "--critic-warmup", "0"]
+    first, second = str(tmp_path / "a.pt"), str(tmp_path / "b.pt")
+    train.main(tiny + ["--history", "--jerk-weight", "0.7", "--out", first])
+    train.main(tiny + ["--resume", first, "--out", second])
+    ckpt = torch.load(second, map_location="cpu")
+    assert ckpt["config"]["obs_dim"] == MISSION_OBS_DIM + HISTORY_DIM
+    assert ckpt["jerk_weight"] == 0.7 and ckpt["residual"] == 0.1
