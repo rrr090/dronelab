@@ -20,7 +20,7 @@
 
 <sub>A trained three-drone team flies a cargo through an unseen city map, with wind zones and gusts, and delivers it with 98% health. The recording comes from the built-in 3D viewer.</sub>
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Results](#results) · [Project layout](#project-layout) · [Roadmap](#roadmap)
+**[Live demo](https://rrr090.github.io/dronelab/)** · [Quick start](#quick-start) · [How it works](#how-it-works) · [Results](#results) · [Project layout](#project-layout) · [Roadmap](#roadmap)
 
 </div>
 
@@ -86,6 +86,7 @@ dronelab cargo train                           # ~20 min on a laptop CPU
 dronelab cargo visualize --policy rl formation # trained vs baseline, side by side
 dronelab mission train                         # learns corrections on top of the baseline
 dronelab mission visualize --themes storm city --difficulty 1.0
+dronelab mission site                          # rebuild the project site    -> site/
 ```
 
 `python -m dronelab ...` works without installing. Add `--help` to any command to see its options. The viewers load three.js from a CDN, so they need an internet connection.
@@ -126,6 +127,7 @@ The policy acts at 50 Hz. For each drone it outputs collective thrust, roll, pit
 - **Algorithm:** PPO (`dronelab/ppo.py`) with observation normalization, GAE and learning-rate decay.
 - **Curriculum:** domain randomization ramps from calm to full difficulty over the first 60% of training. It covers wind, gusts, cargo mass, rope length, motor wear, sensor noise and map density.
 - **Residual missions:** the formation baseline keeps flying the route. The network learns a bounded correction on top of it, so training starts at the baseline's level instead of from zero.
+- **Checkpoint selection:** the best network is chosen on validation maps, which are separate from the training and test maps.
 
 </details>
 
@@ -145,16 +147,27 @@ Results from `dronelab cargo evaluate`, 8 episodes per scenario, after 400 train
 
 ### Missions
 
-Results from `dronelab mission evaluate` on 30 unseen maps, for a policy that outputs full actions:
+Results on 100 unseen maps, with the three training seeds pooled. The maps were not used for training or for choosing settings:
 
 | | Trained policy | Formation baseline |
 |---|---|---|
-| Average score | 69.8 | **72.6** |
-| Delivered | 73% | **87%** |
-| Cargo health when delivered | **95.2** | 83.8 |
-| Rope-jerk damage | **7.8** | 24.9 |
+| Average score | **76.4** | 74.9 |
+| Delivered | 92% | 91% |
+| Cargo health when delivered | **83.1** | 82.3 |
+| Rope-jerk damage | **21.1** | 22.4 |
 
-The trained team handles the cargo far more gently than the baseline. It still fails more missions, because it lags the route and clips obstacles. Residual training targets exactly that.
+The gain is real on average but small: **+1.5 points, 95% interval +0.6 to +2.5**, paired map by map, and the policy scores higher on all five map themes. It does not pass the project's strict test for a win, because the seeds disagree: two gain 2.7 and 2.2 points, and the third loses 0.3. The change in delivery rate (+1 point, interval −1.3 to +3.3) could be noise.
+
+How it got here:
+
+| Policy | Score vs baseline | Delivered vs baseline | Maps |
+|---|---|---|---|
+| Full actions, no baseline | 64.9 vs 74.2 | 69% vs 89% | test set |
+| Residual, correction 0.3 | 65.4 vs 74.2 (seeds 49, 78, 69) | 83% vs 89% | test set |
+| Residual, correction 0.1, best validation checkpoint | 76.0 vs 74.2 | 91% vs 89% | test set |
+| Same policy, reported result | 76.4 vs 74.9 | 92% vs 91% | 100 new maps |
+
+Building on the baseline removed most obstacle crashes, but a large correction shook the cargo apart through rope jerk. The correction size was chosen after seeing the test set, so the final numbers come from new maps. To reproduce them, train three seeds and run `dronelab mission evaluate --seed 6000000 --checkpoint ...`.
 
 ![Mission viewer, city map](docs/images/mission-city.png)
 
@@ -170,6 +183,7 @@ dronelab/
 ├── cargo/             3D three-drone cargo hold
 └── mission/           map generator + planner, mission env, scoring
 tests/                 pytest suite: physics, planning, scoring, viewer export
+site/                  generated project site, deployed to GitHub Pages
 docs/images/           README media
 ```
 
@@ -192,7 +206,8 @@ CI runs the suite on every push.
 - [x] Planar hover with disturbance test suite
 - [x] Three-drone 3D cargo hold under gusts and faults
 - [x] Procedural missions with route planning and cargo health
-- [ ] Residual mission policy that beats the baseline
+- [x] Residual mission policy with a small average gain over the baseline
+- [x] Project site with 3D replays and measured results
 - [ ] GPU-vectorized physics in PyTorch, for thousands of parallel environments
 - [ ] Realism: motor lag, state-estimation noise, a rigid-body cargo, direct motor control
 - [ ] Interpretability: find and ablate the neurons that track cargo swing, rope tension and obstacles
