@@ -76,6 +76,11 @@
   #chart { width: 100%; height: 100%; display: block; cursor: col-resize; }
   #err { position: absolute; inset: 0; display: none; place-items: center; padding: 24px; text-align: center; color: var(--muted); }
 
+  /* embed: just the 3D view, for the iframe on the project page */
+  .embed #app { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+  .embed aside, .embed #chartWrap, .embed .tog, .embed #speed { display: none; }
+  .embed main { grid-template-rows: 1fr; }
+
   @media (max-width: 760px) {
     #app { grid-template-columns: 1fr; grid-template-rows: 1fr 240px; }
     aside { order: 2; border-right: 0; border-top: 1px solid var(--line); }
@@ -157,7 +162,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 const DATA = /*__DATA__*/null;
 const M = DATA.meta;
-const POLICY_COLORS = ['#5aa9ff', '#f5b84b', '#c78bff', '#3ecf8e', '#ff8fb1'];
+document.body.classList.toggle('embed', new URLSearchParams(location.search).has('embed'));
+const POLICY_COLORS = ['#3987e5', '#c98500', '#c78bff', '#3ecf8e', '#ff8fb1'];
 const CRASH = '#ff5d5d';
 const SCALE = 1.5;
 const policyColor = Object.fromEntries(M.policies.map((p, i) => [p, POLICY_COLORS[i % POLICY_COLORS.length]]));
@@ -413,7 +419,7 @@ function buildTotals() {
   $('totals').innerHTML = M.policies.map(p => {
     const s = M.summary[p];
     return `<div class="total"><span class="dot" style="background:${policyColor[p]}"></span><b>${p}</b>
-      <div class="big">${s.mean_score.toFixed(1)} <span class="sub">avg score</span></div>
+      <div class="big">${s.mean_score.toFixed(1)} <span class="sub">avg score on ${s.missions} maps</span></div>
       <div class="sub">${Math.round(s.delivered_rate * 100)}% delivered · health ${isNaN(s.health_if_delivered) ? '–' : s.health_if_delivered.toFixed(1)} when delivered</div></div>`;
   }).join('');
 }
@@ -642,9 +648,14 @@ $('meta').textContent = `${M.policies.join(' vs ')} · ${DATA.missions.length} m
 buildTotals();
 buildMissionList();
 resize();
-const h = parseInt(location.hash.slice(1));
-loadMission(Number.isInteger(h) && h >= 0 && h < DATA.missions.length ? h : 0);
+const hashIndex = () => {
+  const h = parseInt(location.hash.slice(1));
+  return Number.isInteger(h) && h >= 0 && h < DATA.missions.length ? h : 0;
+};
+addEventListener('hashchange', () => { if (DATA.missions[hashIndex()] !== mis) loadMission(hashIndex()); });
+loadMission(hashIndex());
 tick();
+$('err').style.display = 'none';     // a slow load can trip the fallback timer
 </script>
 <script>
   setTimeout(() => {

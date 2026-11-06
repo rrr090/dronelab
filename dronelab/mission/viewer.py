@@ -44,16 +44,22 @@ def export_run(res: MissionResult, policy_name: str, stride: int = 2) -> dict:
 def build_viewer_data(policies: Mapping[str, Policy], maps: Sequence[MissionMap],
                               stride: int = 2, cruise: float = 1.0) -> dict:
     per_policy = {name: run_missions(pol, maps, cruise=cruise, record=True) for name, pol in policies.items()}
+    return viewer_data(per_policy, range(len(maps)), stride)
+
+
+def viewer_data(per_policy: Mapping[str, Sequence[MissionResult]], picks: Sequence[int],
+                stride: int = 2) -> dict:
+    """Viewer data for the recorded runs at indices ``picks``; totals cover all runs."""
     out = []
-    for i, m in enumerate(maps):
-        runs = [export_run(per_policy[name][i], name, stride) for name in policies]
-        out.append({"map": m.to_dict(), "runs": runs})
+    for i in picks:
+        runs = [export_run(rs[i], name, stride) for name, rs in per_policy.items()]
+        out.append({"map": next(iter(per_policy.values()))[i].map.to_dict(), "runs": runs})
     summary = {name: summarize_missions(rs) for name, rs in per_policy.items()}
     motors = [to_three(np.array([x, y, 0.0])).tolist() for x, y in MOTOR_XY]
     return {
         "meta": {
             "dt": DT * stride, "arm": ARM, "motors": motors, "nominal_mass": CARGO_MASS,
-            "nominal_tension": CARGO_MASS * 9.81 / 3 * 1.2, "policies": list(policies),
+            "nominal_tension": CARGO_MASS * 9.81 / 3 * 1.2, "policies": list(per_policy),
             "summary": summary, "generated": _dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         },
         "missions": out,

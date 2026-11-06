@@ -4,7 +4,7 @@
     python -m dronelab <task> <command> [options]
 
 Tasks:     hover, cargo, mission
-Commands:  train, evaluate, visualize
+Commands:  train, evaluate, visualize (and mission site, which builds the project site)
 
 Run ``dronelab <task> <command> --help`` for the options of each command.
 """
@@ -19,11 +19,12 @@ TASKS = {
     "mission": "the cargo team flying through generated maps",
 }
 COMMANDS = ("train", "evaluate", "visualize")
+EXTRA_COMMANDS = {"mission": ("site",)}
 
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) < 2 or argv[0] not in TASKS or argv[1] not in COMMANDS:
+    if len(argv) < 2 or argv[0] not in TASKS or argv[1] not in COMMANDS + EXTRA_COMMANDS.get(argv[0], ()):
         print(__doc__.strip() + "\n")
         for name, desc in TASKS.items():
             print(f"  {name:<8} {desc}")

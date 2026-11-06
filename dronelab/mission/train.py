@@ -14,6 +14,10 @@ size). The correction starts near zero, so training starts from the baseline's
 performance instead of from scratch. ``--residual 0`` trains a policy that
 outputs the full action, warm-started from the cargo network.
 
+Every evaluation flies validation maps, which are separate from the training
+and test maps. The best-scoring network so far is kept next to ``--out`` as
+``<name>_best.pt``, since the last update is not always the best one.
+
 Usage:
     dronelab mission train                       # residual, default 400 updates
     dronelab mission train --updates 600
@@ -23,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 
 import numpy as np
 import torch
@@ -30,13 +35,17 @@ import torch
 from dronelab.cargo.env import ACT_DIM
 from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv, compose_residual
 from dronelab.mission.testing import mission_maps, run_missions, summarize_missions
-from dronelab.ppo import add_ppo_args, train_ppo
+from dronelab.ppo import add_ppo_args, save, train_ppo
+
+VALIDATION_SEED = 4_000_000      # between the training (< 1e6) and test (5e6) map seeds
 
 
-def make_eval(residual=0.0):
-    maps = mission_maps(difficulties=(0.6, 1.0), per=1, seed=4_000_000)   # 10 maps, 2 per theme
+def make_eval(residual=0.0, best_path=None, maps=None):
+    maps = maps or mission_maps(difficulties=(0.5, 1.0), per=3, seed=VALIDATION_SEED)   # 30 maps
+    best = -np.inf
 
     def quick_eval(model, device):
+        nonlocal best
         @torch.no_grad()
         def batched(O):
             a = model(torch.as_tensor(O, device=device))[0].cpu().numpy()
@@ -47,8 +56,13 @@ def make_eval(residual=0.0):
         pol = P(); pol.batched = batched
         s = summarize_missions(run_missions(pol, maps))
         fails = ", ".join(f"{k} x{v}" for k, v in s["failures"].items()) or "none"
+        improved = best_path is not None and s["mean_score"] > best
+        if improved:
+            best = s["mean_score"]
+            save(model, best_path, {"residual": residual, "validation_score": best})
         return (f"delivered {s['delivered_rate']:.0%} | score {s['mean_score']:.1f} "
-                f"| health {s['health_if_delivered']:.1f} | failures: {fails}")
+                f"| health {s['health_if_delivered']:.1f} | failures: {fails}"
+                + (" | new best" if improved else ""))
     return quick_eval
 
 
@@ -108,7 +122,7 @@ def main(argv=None):
                                              formatter_class=argparse.RawDescriptionHelpFormatter), out="checkpoints/mission_mlp.pt",
                      updates=400, eval_every=25, hidden=128, lr=1.5e-4, ent_coef=0.0005,
                      critic_warmup=10)
-    p.add_argument("--residual", type=float, default=0.3,
+    p.add_argument("--residual", type=float, default=0.1,
                    help="size of the learned correction on top of the baseline (0 = full actions)")
     p.add_argument("--init-from", default="",
                    help="warm-start a full-action policy from a trained cargo network")
@@ -127,7 +141,8 @@ def main(argv=None):
     else:
         init = None
     print(f"mode: {'residual x%.2f' % args.residual if args.residual > 0 else 'full actions'}")
-    train_ppo(args, env, MISSION_OBS_DIM, ACT_DIM, eval_fn=make_eval(args.residual),
+    best_path = "{}_best{}".format(*os.path.splitext(args.out))
+    train_ppo(args, env, MISSION_OBS_DIM, ACT_DIM, eval_fn=make_eval(args.residual, best_path),
               episode_stat=episode_stat, model_init=init,
               save_extra={"residual": args.residual})
 

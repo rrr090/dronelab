@@ -140,6 +140,64 @@ def format_mission_table(results: Sequence[MissionResult]) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- comparison
+
+def bootstrap_ci(values, n_boot: int = 10_000, level: float = 0.95, seed: int = 0):
+    """Mean of ``values`` and its bootstrap confidence interval: (mean, low, high)."""
+    values = np.asarray(values, dtype=float)
+    rng = np.random.default_rng(seed)
+    means = values[rng.integers(0, len(values), (n_boot, len(values)))].mean(axis=1)
+    low, high = np.quantile(means, [(1 - level) / 2, (1 + level) / 2])
+    return float(values.mean()), float(low), float(high)
+
+
+def compare_to_baseline(runs: dict[str, Sequence[MissionResult]],
+                        baseline: Sequence[MissionResult]) -> dict:
+    """Compare trained policies (one per training seed) with the baseline, map by map.
+
+    All results must come from the same maps, so each map is a paired comparison.
+    Seeds are averaged per map before bootstrapping over maps. The interval
+    therefore covers which maps were drawn, not training luck, so the verdict
+    also requires every seed to land on the same side of the baseline.
+    """
+    if any(len(rs) != len(baseline) for rs in runs.values()):
+        raise ValueError("every policy must be scored on the same maps")
+
+    def paired(metric):
+        base = np.array([metric(r) for r in baseline], dtype=float)
+        per_seed = np.array([[metric(r) for r in rs] for rs in runs.values()], dtype=float)
+        mean, low, high = bootstrap_ci(per_seed.mean(axis=0) - base)
+        return {"baseline": float(base.mean()), "trained": float(per_seed.mean()),
+                "diff": mean, "ci_low": low, "ci_high": high,
+                "seed_diffs": dict(zip(runs, (per_seed - base).mean(axis=1).tolist()))}
+
+    score = paired(lambda r: r.score)
+    diffs = list(score["seed_diffs"].values())
+    if score["ci_low"] > 0 and min(diffs) > 0:
+        verdict = "trained policy beats the baseline"
+    elif score["ci_high"] < 0 and max(diffs) < 0:
+        verdict = "baseline beats the trained policy"
+    else:
+        verdict = "no clear winner"
+    return {"maps": len(baseline), "seeds": len(runs), "score": score,
+            "delivered": paired(lambda r: float(r.delivered)), "verdict": verdict}
+
+
+def format_comparison(c: dict) -> str:
+    s, d = c["score"], c["delivered"]
+    lines = [f"trained ({c['seeds']} seed{'s' if c['seeds'] != 1 else ''}) vs baseline, "
+             f"paired on {c['maps']} maps, 95% CI:",
+             f"  score      {s['trained']:6.1f} vs {s['baseline']:6.1f}   "
+             f"diff {s['diff']:+6.1f}  [{s['ci_low']:+.1f}, {s['ci_high']:+.1f}]",
+             f"  delivered  {d['trained']:6.1%} vs {d['baseline']:6.1%}   "
+             f"diff {d['diff']:+6.1%}  [{d['ci_low']:+.1%}, {d['ci_high']:+.1%}]"]
+    if c["seeds"] > 1:
+        lines.append("  score diff by seed: "
+                     + ", ".join(f"{k} {v:+.1f}" for k, v in s["seed_diffs"].items()))
+    lines.append(f"verdict: {c['verdict']}")
+    return "\n".join(lines)
+
+
 # ------------------------------------------------------------------ policies
 
 class MissionFormationController(FormationController):

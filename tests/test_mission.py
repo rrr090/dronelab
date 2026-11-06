@@ -2,10 +2,15 @@ import json
 
 import numpy as np
 
+from types import SimpleNamespace
+
 from dronelab.mission import maps as M
 from dronelab.cargo.env import ACT_DIM
 from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv
-from dronelab.mission.testing import MissionFormationController, run_missions
+from dronelab.mission.testing import (
+    MissionFormationController, MissionResult, bootstrap_ci, compare_to_baseline, run_missions,
+)
+from dronelab.mission.site import median_seed, pick_showcase
 from dronelab.mission.viewer import build_viewer_data, write_viewer
 
 
@@ -75,3 +80,108 @@ def test_residual_zero_correction_flies_the_baseline():
         oa = a.step(baseline_actions(oa))[0]
         ob = b.step(np.zeros((1, ACT_DIM)))[0]
     assert np.allclose(a.cp, b.cp) and np.allclose(oa, ob)
+
+
+def _scored(scores):
+    return [MissionResult(map=None, delivered=s > 0, fail_reason="" if s > 0 else "timeout", health=s,
+                          score=s, time_s=1.0, damage={}, mean_track_err=0.0, min_clearance=1.0)
+            for s in scores]
+
+
+def test_bootstrap_ci_brackets_the_mean():
+    mean, low, high = bootstrap_ci(np.arange(100.0))
+    assert low < mean < high and np.isclose(mean, 49.5)
+    assert bootstrap_ci(np.full(10, 3.0)) == (3.0, 3.0, 3.0)
+
+
+def test_comparison_needs_every_seed_to_agree():
+    base = np.linspace(40, 80, 50)
+    win = compare_to_baseline({"a": _scored(base + 5), "b": _scored(base + 7)}, _scored(base))
+    assert win["verdict"] == "trained policy beats the baseline"
+    assert np.isclose(win["score"]["diff"], 6) and win["score"]["ci_low"] > 0
+
+    lose = compare_to_baseline({"a": _scored(base - 5)}, _scored(base))
+    assert lose["verdict"] == "baseline beats the trained policy"
+
+    split = compare_to_baseline({"a": _scored(base + 20), "b": _scored(base - 1)}, _scored(base))
+    assert split["score"]["ci_low"] > 0 and split["verdict"] == "no clear winner"
+
+
+def _zero_correction_checkpoints(tmp_path, n=2):
+    import torch
+    from dronelab.policy import ActorCritic
+    from dronelab.ppo import save
+
+    model = ActorCritic(hidden=16, obs_dim=MISSION_OBS_DIM, act_dim=ACT_DIM, obs_norm=True, init_log_std=-1.0)
+    with torch.no_grad():
+        model.actor_mean.weight.zero_()
+        model.actor_mean.bias.zero_()
+    paths = [str(tmp_path / f"s{i}.pt") for i in range(n)]
+    for path in paths:
+        save(model, path, {"residual": 0.3})
+    return paths
+
+
+def test_evaluate_scores_seed_checkpoints_against_the_baseline(tmp_path):
+    from dronelab.mission import evaluate
+
+    paths = _zero_correction_checkpoints(tmp_path)
+    report = tmp_path / "eval.json"
+    evaluate.main(["--checkpoint", *paths, "--themes", "forest", "--difficulties", "0.0",
+                   "--per", "2", "--json", str(report)])
+    out = json.loads(report.read_text())
+    assert set(out) == {"s0", "s1", "formation", "comparison"}
+    assert out["comparison"]["score"]["diff"] == 0          # zero correction is the baseline
+    assert out["comparison"]["verdict"] == "no clear winner"
+
+
+def _themed(scores, themes):
+    rs = _scored(scores)
+    for r, theme in zip(rs, themes):
+        r.map = SimpleNamespace(theme=theme)
+    return rs
+
+
+def test_showcase_has_each_themes_best_map_then_the_worst():
+    themes = ["forest", "forest", "city", "city", "city"]
+    base = _themed([50, 50, 50, 50, 50], themes)
+    trained = _themed([60, 45, 80, 20, 55], themes)
+    assert pick_showcase(trained, base) == [2, 0, 3]
+
+    one_theme = _themed([60, 40], ["forest", "forest"])
+    assert pick_showcase(one_theme, _themed([50, 50], ["forest", "forest"])) == [0, 1]
+
+
+def test_replays_come_from_the_middle_seed():
+    assert median_seed({"low": _scored([10]), "high": _scored([90]), "mid": _scored([50])}) == "mid"
+
+
+def test_site_replays_are_the_flights_behind_the_numbers(tmp_path):
+    from dronelab.mission import site
+
+    out = tmp_path / "site"
+    site.main(["--checkpoint", *_zero_correction_checkpoints(tmp_path), "--themes", "forest", "city",
+               "--difficulties", "0.0", "--per", "2", "--out", str(out)])
+    page = (out / "index.html").read_text(encoding="utf-8")
+    viewer = (out / "viewer.html").read_text(encoding="utf-8")
+    assert "/*__DATA__*/null" not in page and "/*__DATA__*/null" not in viewer
+    assert (out / "images" / "mission-forest.png").exists()
+
+    data = json.loads(page.split("const D = ", 1)[1].split(";\n", 1)[0].replace("<\\/", "</"))
+    assert data["comparison"]["maps"] == 4 and data["comparison"]["verdict"] == "no clear winner"
+    assert [t["theme"] for t in data["themes"]] == ["forest", "city"]
+    assert data["showcase"][-1]["worst"] and not data["showcase"][0]["worst"]
+    assert all(s["trained"] == s["baseline"] for s in data["showcase"])   # zero correction is the baseline
+
+
+def test_training_keeps_the_best_validation_checkpoint(tmp_path):
+    from dronelab.mission.train import make_eval
+    from dronelab.policy import ActorCritic
+
+    model = ActorCritic(hidden=16, obs_dim=MISSION_OBS_DIM, act_dim=ACT_DIM, obs_norm=True, init_log_std=-1.0)
+    best = tmp_path / "best.pt"
+    quick_eval = make_eval(0.1, str(best), maps=[M.generate_map(1, "forest", 0.0)])
+    assert "new best" in quick_eval(model, "cpu") and best.exists()
+
+    best.unlink()
+    assert "new best" not in quick_eval(model, "cpu") and not best.exists()   # same score is no gain

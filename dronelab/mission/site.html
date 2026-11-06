@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dronelab</title>
+<meta name="description" content="Reinforcement learning for three drones carrying a cargo on ropes through wind and generated obstacle maps.">
+<meta property="og:title" content="dronelab">
+<meta property="og:description" content="Three drones, one cargo on ropes, trained with PPO and tested on unseen maps. Watch the flights in 3D.">
+<meta property="og:image" content="https://rrr090.github.io/dronelab/images/mission-forest.png">
+<style>
+  :root {
+    --bg: #0d1015; --panel: #141922; --panel-2: #1a202b; --line: #262e3b; --grid: #1f2632;
+    --text: #e6e9ef; --text-2: #b3bbc9; --muted: #8b95a7; --link: #7db8ff;
+    --trained: #3987e5; --baseline: #c98500; --ok: #3ecf8e; --bad: #ff7a7a;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--link); text-underline-offset: 3px; }
+  h1, h2, h3, p { margin: 0; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 20px 0 0; }
+  .brand { font-weight: 700; font-size: 17px; }
+  nav { display: flex; gap: 18px; font-size: 14px; }
+  nav a { color: var(--text-2); text-decoration: none; }
+  nav a:hover { color: var(--text); }
+
+  .intro { padding: 44px 0 26px; }
+  .intro h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.12; letter-spacing: -.02em; max-width: 19em; }
+  .intro p { color: var(--text-2); font-size: 18px; margin-top: 14px; max-width: 40em; }
+
+  .stage { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
+  #frame { display: block; width: 100%; height: min(62vh, 560px); min-height: 340px; border: 0; background: var(--bg); }
+  .key { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 18px; padding: 10px 14px;
+    border-top: 1px solid var(--line); font-size: 14px; color: var(--text-2); }
+  .key span.team { display: inline-flex; align-items: center; gap: 7px; margin-right: 16px; }
+  .swatch { width: 11px; height: 11px; border-radius: 50%; display: inline-block; flex: none; }
+  .picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-top: 12px; }
+  .pick { font: inherit; color: var(--text); text-align: left; background: var(--panel); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; }
+  .pick:hover { border-color: #3a4456; }
+  .pick[aria-pressed="true"] { border-color: var(--trained); background: var(--panel-2); }
+  .pick b { display: block; text-transform: capitalize; font-size: 15px; }
+  .pick small { display: block; color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .note { color: var(--muted); font-size: 14px; margin-top: 10px; }
+
+  section { padding: 60px 0 0; }
+  section > h2, .wrap > section > h2 { font-size: 27px; line-height: 1.2; letter-spacing: -.01em; }
+  .lead { color: var(--text-2); margin-top: 10px; max-width: 42em; }
+  h3 { font-size: 16px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-top: 22px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { color: var(--muted); font-size: 14px; }
+  .tile .value { font-size: 30px; font-weight: 650; line-height: 1.25; }
+  .tile .sub { color: var(--text-2); font-size: 14px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 14px; position: relative; }
+  .panel p.cap { color: var(--muted); font-size: 14px; margin-top: 2px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; font-size: 14px; color: var(--text-2); margin-top: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  svg text { font: 13px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--text-2); font-variant-numeric: tabular-nums; }
+  svg .hit { fill: transparent; }
+  svg .hit:hover { fill: rgba(255,255,255,.04); }
+  #tip { position: absolute; display: none; pointer-events: none; z-index: 5; background: #0a0d12; border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 10px; font-size: 13px; line-height: 1.45; white-space: nowrap; }
+  #tip b { text-transform: capitalize; }
+
+  .tablewrap { overflow-x: auto; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); font-size: 15px; }
+  th, td { padding: 9px 14px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  th { color: var(--muted); font-weight: 500; font-size: 14px; }
+  th:first-child, td:first-child { text-align: left; }
+  td { font-variant-numeric: tabular-nums; }
+  td.wrapok { white-space: normal; min-width: 170px; }
+
+  .stages { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 14px; margin-top: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .shot { aspect-ratio: 16 / 10; overflow: hidden; padding: 0; }
+  .shot img { display: block; width: 100%; height: 100%; object-fit: cover; transform: scale(1.7); transform-origin: 72% 38%; }
+  .card div { padding: 12px 14px 14px; }
+  .card p { color: var(--text-2); font-size: 15px; margin-top: 4px; }
+
+  .flow { display: grid; grid-template-columns: 1fr 26px 1.25fr 26px 1fr 26px 1fr; align-items: center; margin-top: 22px; }
+  .flow .arrow { color: var(--muted); text-align: center; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; font-size: 14px; line-height: 1.4; color: var(--text-2); }
+  .box b { display: block; color: var(--text); font-size: 15px; }
+  .box.learned { border-color: var(--trained); }
+  .pair { display: grid; gap: 8px; }
+
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px 34px; margin-top: 18px; }
+  .cols p { color: var(--text-2); font-size: 15px; margin-top: 3px; }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow-x: auto;
+    font: 14px/1.6 ui-monospace, Consolas, Menlo, monospace; margin: 14px 0 0; }
+  footer { color: var(--muted); font-size: 14px; padding: 56px 0 36px; }
+
+  @media (max-width: 760px) {
+    .flow { grid-template-columns: 1fr; gap: 2px; }
+    .flow .arrow { transform: rotate(90deg); }
+    #frame { height: min(58vh, 460px); }
+    section { padding-top: 46px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="brand">dronelab</span>
+    <nav>
+      <a href="#results">Results</a>
+      <a href="#how">How it works</a>
+      <a href="https://github.com/rrr090/dronelab">GitHub</a>
+    </nav>
+  </header>
+
+  <div class="intro">
+    <h1>Three drones, one cargo on ropes, and a map they have never seen</h1>
+    <p>A reinforcement learning project in Python. A hand-written controller flies the route, and a small neural network, trained with PPO, learns to correct it through wind, gusts and obstacles.</p>
+  </div>
+
+  <div class="stage">
+    <iframe id="frame" title="3D replay of the drone team flying a mission" src="viewer.html?embed#0" allow="fullscreen"></iframe>
+    <div class="key">
+      <div>
+        <span class="team"><i class="swatch" style="background:var(--trained)"></i>Trained policy</span>
+        <span class="team"><i class="swatch" style="background:var(--baseline)"></i>Baseline</span>
+      </div>
+      <a id="full" href="viewer.html#0">Open the full viewer, with health charts</a>
+    </div>
+  </div>
+  <div class="picker" id="picker"></div>
+  <p class="note" id="pickNote"></p>
+
+  <section id="results">
+    <h2 id="headline"></h2>
+    <p class="lead" id="lead"></p>
+    <div class="tiles" id="tiles"></div>
+
+    <div class="panel" id="themePanel">
+      <h3>Score by map theme</h3>
+      <p class="cap" id="themeCap"></p>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--trained)"></i>Trained policy</span>
+        <span><i class="swatch" style="background:var(--baseline)"></i>Baseline</span>
+      </div>
+      <div id="themeChart"></div>
+    </div>
+
+    <div class="panel" id="seedPanel">
+      <h3>Score difference from the baseline</h3>
+      <p class="cap" id="seedCap"></p>
+      <div id="seedChart"></div>
+    </div>
+    <div id="tip" role="status"></div>
+
+    <div class="tablewrap"><table id="detail"></table></div>
+  </section>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <p class="lead">The project grew in three stages, and each one has its own test suite and a hand-written controller to beat.</p>
+    <div class="stages">
+      <div class="card"><div class="shot"><img src="images/hover-lanes.png" alt="A planar drone in twelve disturbance scenarios" loading="lazy"></div>
+        <div><h3>1. Hover</h3><p>One planar quadrotor holds its position under pushes and motor faults.</p></div></div>
+      <div class="card"><div class="shot"><img src="images/cargo-storm.png" alt="Three drones holding a cargo in a storm" loading="lazy"></div>
+        <div><h3>2. Cargo</h3><p>Three 3D quadrotors share a load on elastic ropes. In a storm stronger than anything in training, the trained team succeeded in 75% of 8 test episodes and the baseline in 12%.</p></div></div>
+      <div class="card"><div class="shot"><img src="images/mission-forest.png" alt="The team flying through a forest map with wind zones" loading="lazy"></div>
+        <div><h3>3. Mission</h3><p>The team flies the cargo through a generated map to a goal pad. The score is the cargo's health on delivery.</p></div></div>
+    </div>
+
+    <h3 style="margin-top:34px">The learned correction</h3>
+    <p class="lead">Learning to fly from nothing scored below the baseline, so the network now starts from it. With a zero correction the team flies exactly like the baseline, and training only has to find improvements.</p>
+    <p class="lead">The first version of this also lost. With a correction three times larger, three training seeds scored 49, 78 and 69 against the baseline's 74, and the cargo was shaken apart by rope jerk. Shrinking the correction and keeping the best checkpoint on validation maps brought every seed to 75.5–76.8 on those same test maps. Because that choice was made while looking at those maps, the results above come from 100 new ones.</p>
+    <div class="flow" role="img" aria-label="Observations feed the baseline controller and the neural network. Their outputs are added and sent to the attitude controller, which drives the motors.">
+      <div class="box"><b>Observations</b>93 values: drone and cargo state, route, obstacle distances</div>
+      <div class="arrow">→</div>
+      <div class="pair">
+        <div class="box"><b>Baseline controller</b>Follows the planned route</div>
+        <div class="box learned"><b>Neural network</b>93 → 128 → 128 → 12, adds a bounded correction</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="box"><b>Attitude controller</b>Turns thrust and rate commands into motor thrusts</div>
+      <div class="arrow">→</div>
+      <div class="box"><b>12 motors</b>Physics at 500 Hz, policy at 50 Hz</div>
+    </div>
+
+    <div class="cols">
+      <div><h3>Physics</h3><p>Rigid-body quadrotors and a cargo on spring-damper ropes that can go slack and snap tight, written in vectorized NumPy.</p></div>
+      <div><h3>Maps</h3><p>Forest, city, gate, storm and mixed maps are generated from a seed. An A* planner finds a route wide enough for the formation.</p></div>
+      <div><h3>Training</h3><p>PPO written from scratch, with 64 parallel environments and a curriculum that ramps up wind, gusts and map density.</p></div>
+      <div><h3>Cargo health</h3><p>Starts at 100 and drops with rope jerks, high g-forces, impacts and ropes rubbing on obstacles.</p></div>
+    </div>
+  </section>
+
+  <section id="limits">
+    <h2>Limitations</h2>
+    <p class="lead">This is a learning project, not a validated flight model. The drones observe their state perfectly, motors respond instantly, the cargo is a point mass, and there is no aerodynamic interaction between drones. Results describe this simulator only.</p>
+    <p class="lead">To run it yourself:</p>
+    <pre>git clone https://github.com/rrr090/dronelab.git &amp;&amp; cd dronelab
+pip install -e ".[dev]"
+dronelab mission visualize --themes storm city --difficulty 1.0</pre>
+  </section>
+
+  <footer>Results generated <span id="generated"></span>. Code and data on <a href="https://github.com/rrr090/dronelab">GitHub</a>, MIT licence.</footer>
+</div>
+
+<script>
+const D = /*__DATA__*/null;
+const $ = id => document.getElementById(id);
+const C = D.comparison, S = C.score, DL = C.delivered, T = D.summary.trained, B = D.summary.baseline;
+const pct = v => `${Math.round(v * 100)}%`;
+const signed = v => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}`;
+const num = v => Number.isFinite(v) ? v.toFixed(1) : '–';
+const seedName = s => s.replace(/^.*_s(\d+)(_best)?$/, 'Seed $1');
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------------------------------------------------------------- replays
+const outcome = o => o.delivered ? `delivered, ${o.score.toFixed(0)}` : o.reason;
+D.showcase.forEach((m, i) => {
+  const b = document.createElement('button');
+  b.className = 'pick'; b.setAttribute('aria-pressed', i === 0);
+  b.innerHTML = `<b>${m.theme}</b><small>Trained: ${outcome(m.trained)}</small><small>Baseline: ${outcome(m.baseline)}</small>`;
+  b.onclick = () => {
+    $('frame').src = `viewer.html?embed#${i}`;
+    $('full').href = `viewer.html#${i}`;
+    document.querySelectorAll('.pick').forEach((x, k) => x.setAttribute('aria-pressed', k === i));
+  };
+  $('picker').appendChild(b);
+});
+$('pickNote').textContent = `These are real flights from the test set, from ${seedName(D.replay_seed).toLowerCase()}. ` +
+  `The first ${D.showcase.length - 1} are the trained policy's best map in each theme, so they flatter it. ` +
+  `The last is its worst map overall. The numbers below cover all ${C.maps} maps.`;
+
+// ---------------------------------------------------------------- headline
+$('headline').textContent = {
+  'trained policy beats the baseline': 'The trained policy beats the hand-written baseline',
+  'baseline beats the trained policy': 'The hand-written baseline still beats the trained policy',
+  'no clear winner': S.ci_high < 0 ? 'The trained policy falls short of the baseline on average, and the seeds disagree'
+    : S.ci_low > 0 ? 'The trained policy beats the baseline on average, but the seeds disagree'
+    : 'No clear winner between the trained policy and the baseline',
+}[C.verdict];
+$('lead').textContent = `Both flew the same ${C.maps} maps, none of which were used for training or for choosing settings. ` +
+  `A mission scores the cargo's health on delivery, and 0 if it fails. ` +
+  `The result only counts as a win if the 95% interval excludes zero and all ${plural(C.seeds, 'training seed')} agree.`;
+const tiles = [
+  ['Mean score', S.trained.toFixed(1), `baseline ${S.baseline.toFixed(1)}`],
+  ['Difference in score', signed(S.diff), `95% interval ${signed(S.ci_low)} to ${signed(S.ci_high)}`],
+  ['Delivered', pct(DL.trained), `baseline ${pct(DL.baseline)}`],
+  ['Cargo health when delivered', num(T.health_if_delivered), `baseline ${num(B.health_if_delivered)}`],
+];
+$('tiles').innerHTML = tiles.map(([l, v, s]) =>
+  `<div class="tile"><div class="label">${l}</div><div class="value num">${v}</div><div class="sub num">${s}</div></div>`).join('');
+
+// ---------------------------------------------------------------- charts
+const NS = 'http://www.w3.org/2000/svg';
+function el(parent, tag, attrs, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  parent.appendChild(e);
+  return e;
+}
+function tooltip(target, html) {
+  const tip = $('tip'), host = $('results');
+  const place = ev => {
+    const r = host.getBoundingClientRect();
+    tip.style.display = 'block';
+    const x = Math.min(ev.clientX - r.left + 14, r.width - tip.offsetWidth - 4);
+    tip.style.left = `${Math.max(0, x)}px`;
+    tip.style.top = `${ev.clientY - r.top + 14}px`;
+  };
+  target.addEventListener('pointerenter', ev => { tip.innerHTML = html; place(ev); });
+  target.addEventListener('pointermove', place);
+  target.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+}
+function axis(svg, x, ticks, top, bottom, format) {
+  ticks.forEach(t => {
+    el(svg, 'line', { x1: x(t), x2: x(t), y1: top, y2: bottom, stroke: css('--grid') });
+    el(svg, 'text', { x: x(t), y: bottom + 16, 'text-anchor': 'middle' }, format(t));
+  });
+}
+function themeChart() {
+  const host = $('themeChart'); host.textContent = '';
+  const rows = [...D.themes, { theme: 'All maps', maps: C.maps, trained: S.trained, baseline: S.baseline,
+    trained_delivered: DL.trained, baseline_delivered: DL.baseline }];
+  const W = host.clientWidth, rowH = 34, top = 8, left = 76, right = 14;
+  const H = top + rows.length * rowH + 26;
+  const svg = el(host, 'svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img',
+    'aria-label': 'Mean score per map theme for the trained policy and the baseline. The values are in the table below.' });
+  const vals = rows.flatMap(r => [r.trained, r.baseline]);
+  const lo = Math.floor(Math.min(...vals) / 10) * 10, hi = Math.ceil(Math.max(...vals) / 10) * 10;
+  const x = v => left + (W - left - right) * (v - lo) / (hi - lo);
+  const ticks = []; for (let t = lo; t <= hi; t += hi - lo > 50 ? 20 : 10) ticks.push(t);
+  axis(svg, x, ticks, top, top + rows.length * rowH, String);
+  rows.forEach((r, i) => {
+    const y = top + i * rowH + rowH / 2;
+    el(svg, 'text', { x: 0, y: y + 4, style: r.theme === 'All maps' ? 'font-weight:600' : 'text-transform:capitalize' }, r.theme);
+    el(svg, 'line', { x1: x(r.baseline), x2: x(r.trained), y1: y, y2: y, stroke: css('--muted'), 'stroke-width': 2 });
+    el(svg, 'circle', { cx: x(r.baseline), cy: y, r: 6, fill: css('--baseline'), stroke: css('--panel'), 'stroke-width': 2 });
+    el(svg, 'circle', { cx: x(r.trained), cy: y, r: 6, fill: css('--trained'), stroke: css('--panel'), 'stroke-width': 2 });
+    const hit = el(svg, 'rect', { class: 'hit', x: 0, y: y - rowH / 2, width: W, height: rowH });
+    tooltip(hit, `<b>${r.theme}</b>, ${r.maps} maps<br>Trained: score ${r.trained.toFixed(1)}, delivered ${pct(r.trained_delivered)}` +
+      `<br>Baseline: score ${r.baseline.toFixed(1)}, delivered ${pct(r.baseline_delivered)}`);
+  });
+}
+function seedChart() {
+  const host = $('seedChart'); host.textContent = '';
+  const seeds = Object.entries(S.seed_diffs);
+  const rows = [['All maps', S.diff, S.ci_low, S.ci_high], ...seeds.map(([k, v]) => [seedName(k), v])];
+  const W = host.clientWidth, rowH = 30, top = 8, left = 76, right = 14;
+  const vals = [0, S.ci_low, S.ci_high, ...seeds.map(s => s[1])];
+  const span = Math.max(...vals.map(Math.abs), 1), step = span > 20 ? 10 : span > 8 ? 5 : span > 3 ? 2 : 1;
+  const lim = Math.ceil(span / step) * step;
+  const H = top + rows.length * rowH + 26;
+  const svg = el(host, 'svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img',
+    'aria-label': `Mean score difference ${signed(S.diff)} with a 95% interval from ${signed(S.ci_low)} to ${signed(S.ci_high)}.` });
+  const x = v => left + (W - left - right) * (v + lim) / (2 * lim);
+  const ticks = []; for (let t = -lim; t <= lim; t += step * (W < 480 ? 2 : 1)) ticks.push(t);
+  axis(svg, x, ticks, top, top + rows.length * rowH, t => t > 0 ? `+${t}` : t < 0 ? `−${-t}` : '0');
+  el(svg, 'line', { x1: x(0), x2: x(0), y1: top, y2: top + rows.length * rowH, stroke: css('--muted'), 'stroke-width': 1.5 });
+  rows.forEach(([name, v, lo, hi], i) => {
+    const y = top + i * rowH + rowH / 2;
+    el(svg, 'text', { x: 0, y: y + 4, style: i ? '' : 'font-weight:600' }, name);
+    if (lo !== undefined) el(svg, 'line', { x1: x(lo), x2: x(hi), y1: y, y2: y, stroke: css('--trained'), 'stroke-width': 3, 'stroke-linecap': 'round' });
+    el(svg, 'circle', { cx: x(v), cy: y, r: i ? 5 : 6.5, fill: css('--trained'), stroke: css('--panel'), 'stroke-width': 2 });
+    const hit = el(svg, 'rect', { class: 'hit', x: 0, y: y - rowH / 2, width: W, height: rowH });
+    tooltip(hit, lo === undefined ? `${name}: ${signed(v)} points`
+      : `Mean of all seeds: ${signed(v)} points<br>95% interval ${signed(lo)} to ${signed(hi)}`);
+  });
+}
+function drawCharts() { themeChart(); seedChart(); }
+$('themeCap').textContent = `Mean score, seeds pooled. The axis is zoomed in and does not start at zero. Each theme has only ${D.themes[0].maps} maps, so small gaps can be noise.`;
+$('seedCap').textContent = `Points right of zero favour the trained policy. The interval covers which maps were drawn, not training luck, which is why each seed is shown too.`;
+drawCharts();
+let lastWidth = innerWidth;
+addEventListener('resize', () => { if (innerWidth !== lastWidth) { lastWidth = innerWidth; drawCharts(); } });
+
+// ---------------------------------------------------------------- detail table
+const fails = s => Object.entries(s.failures).map(([k, v]) => `${k} ×${v}`).join(', ') || 'none';
+const rows = [
+  ['Mean score', T.mean_score.toFixed(1), B.mean_score.toFixed(1)],
+  ['Delivered', pct(T.delivered_rate), pct(B.delivered_rate)],
+  ['Cargo health when delivered', num(T.health_if_delivered), num(B.health_if_delivered)],
+  ['Flight time when delivered', `${num(T.mean_time_s)} s`, `${num(B.mean_time_s)} s`],
+  ['Route tracking error', `${T.mean_track_err.toFixed(2)} m`, `${B.mean_track_err.toFixed(2)} m`],
+  ...Object.keys(T.damage).map(k => [`Damage: ${k}`, T.damage[k].toFixed(1), B.damage[k].toFixed(1)]),
+  ['Failed missions', fails(T), fails(B)],
+];
+$('detail').innerHTML = `<thead><tr><th>All ${C.maps} maps</th><th>Trained (${plural(C.seeds, 'seed')} pooled, ${T.missions} flights)</th><th>Baseline (${B.missions} flights)</th></tr></thead><tbody>` +
+  rows.map(([a, t, b]) => `<tr><td>${a}</td><td class="wrapok">${t}</td><td class="wrapok">${b}</td></tr>`).join('') + '</tbody>';
+$('generated').textContent = D.generated;
+</script>
+</body>
+</html>
