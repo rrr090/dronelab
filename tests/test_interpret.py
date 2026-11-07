@@ -2,9 +2,10 @@ import numpy as np
 import torch
 
 from dronelab.mission import maps as M
-from dronelab.mission.env import MISSION_OBS_DIM, MissionEnv
+from dronelab.mission.env import HISTORY_DIM, HISTORY_LAGS, MISSION_OBS_DIM, MissionEnv
 from dronelab.mission.interpret import (
-    OBSTACLE, REL, TENSION, VEL, ablated_policy, collect, concept_signals, forward, matched_control,
+    OBSTACLE, PAST_CARGO_VEL, PAST_OFFSET, PAST_TENSION, PEAK_TENSION, REL, TENSION, VEL, ablated_policy,
+    collect, concept_signals, forward, matched_control,
     occlude, swing_state, tuning, untrained_copy,
 )
 from dronelab.mission.testing import MissionFormationController, load_mission_policy
@@ -55,6 +56,39 @@ def test_swing_occlusion_removes_swing_and_keeps_the_formation():
     shape = lambda A: A[:, REL] - A[:, REL].mean(1, keepdims=True)
     speeds = lambda A: A[:, VEL] - A[:, VEL].mean(1, keepdims=True)
     assert np.allclose(shape(out), shape(O), atol=1e-5) and np.allclose(speeds(out), speeds(O), atol=1e-5)
+
+
+def test_history_columns_match_the_env():
+    env = MissionEnv(2, seed=0, history=True, maps=[M.generate_map(1, "forest", 0.5), M.generate_map(2, "storm", 0.5)])
+    frames = [env.reset()]
+    for _ in range(40):
+        frames.append(env.step(np.full((2, 12), 0.05))[0])
+    now = frames[-1]
+    assert np.allclose(now[:, PEAK_TENSION], env.tension_peak / 10, atol=1e-5)
+    for i, lag in enumerate(HISTORY_LAGS):
+        then = frames[-1 - lag]
+        assert np.allclose(now[:, PAST_TENSION.reshape(-1, 3)[i]], then[:, TENSION], atol=1e-5)
+        assert np.allclose(now[:, PAST_CARGO_VEL[i]], then[:, 3:5], atol=1e-5)
+        assert np.allclose(now[:, PAST_OFFSET.reshape(-1, 2)[i]], swing_state(then)[0], atol=1e-4)
+
+
+def test_occlusion_hides_the_concept_in_history_too():
+    O = np.random.default_rng(0).normal(size=(50, MISSION_OBS_DIM + HISTORY_DIM)).astype(np.float32)
+    mean_obs = O.mean(0)
+    past = np.arange(MISSION_OBS_DIM, O.shape[1])
+
+    hidden = occlude(O, "tension", mean_obs)
+    cols = np.r_[PEAK_TENSION, PAST_TENSION]
+    assert np.allclose(hidden[:, cols], mean_obs[cols])
+    assert np.array_equal(hidden[:, np.setdiff1d(past, cols)], O[:, np.setdiff1d(past, cols)])
+
+    hidden = occlude(O, "swing", mean_obs)
+    assert np.allclose(hidden[:, PAST_OFFSET], mean_obs[PAST_OFFSET])
+    assert np.allclose(hidden[:, PAST_CARGO_VEL], O[:, None, 3:5])
+    cols = np.r_[PAST_OFFSET, PAST_CARGO_VEL.ravel()]
+    assert np.array_equal(hidden[:, np.setdiff1d(past, cols)], O[:, np.setdiff1d(past, cols)])
+
+    assert np.array_equal(occlude(O, "obstacle", mean_obs)[:, past], O[:, past])
 
 
 def test_forward_matches_the_model():
