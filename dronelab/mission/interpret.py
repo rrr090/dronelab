@@ -29,7 +29,7 @@ import os
 import numpy as np
 import torch
 
-from dronelab.mission.env import MISSION_OBS_DIM, compose_residual
+from dronelab.mission.env import HISTORY_FEATURES, HISTORY_LAGS, MISSION_OBS_DIM, compose_residual
 from dronelab.mission.maps import THEMES
 from dronelab.mission.testing import (
     bootstrap_ci, load_mission_policy, mission_maps, run_missions, summarize_missions,
@@ -51,6 +51,14 @@ BODY_DIST = np.array([72, 76, 80, 84])
 ROPE_DIST = np.array([88, 89, 90])
 OBSTACLE = np.arange(72, 91)
 SENSE_RANGE = 3.0
+
+# History inputs, present when the network has more than MISSION_OBS_DIM inputs:
+# peak tensions, then per lag a frame of rope tension, cargo velocity, cargo offset.
+PEAK_TENSION = MISSION_OBS_DIM + np.arange(3)
+PAST_FRAME = MISSION_OBS_DIM + 3 + HISTORY_FEATURES * np.arange(len(HISTORY_LAGS))[:, None]
+PAST_TENSION = (PAST_FRAME + np.arange(3)).ravel()
+PAST_CARGO_VEL = PAST_FRAME + np.arange(3, 5)      # horizontal only, (lags, 2)
+PAST_OFFSET = (PAST_FRAME + np.arange(6, 8)).ravel()
 
 
 # ------------------------------------------------------------------ concepts
@@ -83,10 +91,18 @@ def occlude(O: np.ndarray, concept: str, mean_obs: np.ndarray) -> np.ndarray:
 
     Swing lives in the team's shared offset and velocity relative to the cargo,
     so those are shifted to their average while the formation shape is kept.
+
+    History inputs carry the same concepts and are occluded with them, otherwise
+    the network could read the hidden value from a past frame. Past cargo velocity
+    is absolute and past team velocity is not recorded, so it is set to the current
+    cargo velocity (no recent acceleration): its average would show a false swing
+    whenever the team is travelling.
     """
     out = O.copy()
+    history = O.shape[1] > MISSION_OBS_DIM
     if concept == "tension":
-        out[:, TENSION] = mean_obs[TENSION]
+        cols = np.r_[TENSION, PEAK_TENSION, PAST_TENSION] if history else TENSION
+        out[:, cols] = mean_obs[cols]
     elif concept == "obstacle":
         out[:, OBSTACLE] = mean_obs[OBSTACLE]
     elif concept == "swing":
@@ -94,6 +110,9 @@ def occlude(O: np.ndarray, concept: str, mean_obs: np.ndarray) -> np.ndarray:
         ref_offset, ref_rate = swing_state(mean_obs[None])
         out[:, REL[:, :2]] += (offset - ref_offset)[:, None]
         out[:, VEL[:, :2]] += ((rate - ref_rate) / 2)[:, None]
+        if history:
+            out[:, PAST_OFFSET] = mean_obs[PAST_OFFSET]
+            out[:, PAST_CARGO_VEL] = O[:, None, CARGO_VEL][..., :2]
     else:
         raise ValueError(f"unknown concept {concept}")
     return out
