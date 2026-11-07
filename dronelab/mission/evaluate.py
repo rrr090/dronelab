@@ -5,6 +5,7 @@ Usage:
     dronelab mission evaluate --checkpoint a.pt b.pt c.pt   # one checkpoint per training seed
     dronelab mission evaluate --policy rl --per 5      # 5 maps per theme x difficulty
     dronelab mission evaluate --themes storm city --difficulties 1.0
+    dronelab mission evaluate --policy rl --checkpoint a.pt b.pt --json out.json   # per-map scores for paired comparisons
 """
 from __future__ import annotations
 
@@ -48,7 +49,10 @@ def main(argv=None):
         results[name] = run_missions(pol, maps, cruise=args.cruise)
         print(f"policy: {name}")
         print(format_mission_table(results[name]) + "\n")
-        out[name] = summarize_missions(results[name])
+        out[name] = {**summarize_missions(results[name]),
+                     "per_map": [{"map_seed": int(r.map.seed), "theme": r.map.theme, "score": float(r.score),
+                                  "delivered": bool(r.delivered), "time_s": float(r.time_s)}
+                                 for r in results[name]]}
     baseline = results.pop("formation", None)
     if baseline is not None and results:
         out["comparison"] = compare_to_baseline(results, baseline)
