@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 import torch
 
 from types import SimpleNamespace
@@ -138,6 +139,9 @@ def test_evaluate_scores_seed_checkpoints_against_the_baseline(tmp_path):
     assert set(out) == {"s0", "s1", "formation", "comparison"}
     assert out["comparison"]["score"]["diff"] == 0          # zero correction is the baseline
     assert out["comparison"]["verdict"] == "no clear winner"
+    assert [m["map_seed"] for m in out["s0"]["per_map"]] == [m["map_seed"] for m in out["s1"]["per_map"]]
+    assert len(out["s0"]["per_map"]) == 2
+    assert np.mean([m["score"] for m in out["s0"]["per_map"]]) == pytest.approx(out["s0"]["mean_score"])
 
 
 def _themed(scores, themes):
