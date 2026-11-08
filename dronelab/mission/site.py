@@ -5,7 +5,7 @@ those flights. The replays are a selection of the same flights the numbers
 describe, not a separate run (a smaller batch would draw different gusts).
 
 Usage:
-    dronelab mission site                                    # 100 maps, three residual seeds
+    dronelab mission site                                    # 100 maps, the chosen policy
     dronelab mission site --checkpoint a.pt --per 1 --out outputs/site_preview
 """
 from __future__ import annotations
@@ -30,8 +30,8 @@ from dronelab.viz import write_page
 TEMPLATE = Path(__file__).with_name("site.html")
 IMAGES = Path(__file__).parents[2] / "docs" / "images"
 PAGE_IMAGES = ("hover-lanes.png", "cargo-storm.png", "mission-forest.png")
-SEEDS = [f"checkpoints/residual01_s{i}_best.pt" for i in range(3)]
-REPORT_SEED = 6_000_000          # maps never used to choose settings, unlike the EVAL_SEED set
+SEEDS = ["checkpoints/chosen.pt"]
+REPORT_SEED = 9_700_000          # maps never used for training or for choosing a model
 
 
 def median_seed(runs: dict[str, Sequence[MissionResult]]) -> str:

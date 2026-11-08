@@ -175,13 +175,14 @@
 
     <h3 style="margin-top:34px">The learned correction</h3>
     <p class="lead">Learning to fly from nothing scored below the baseline, so the network now starts from it. With a zero correction the team flies exactly like the baseline, and training only has to find improvements.</p>
-    <p class="lead">The first version of this also lost. With a correction three times larger, three training seeds scored 49, 78 and 69 against the baseline's 74, and the cargo was shaken apart by rope jerk. Shrinking the correction and keeping the best checkpoint on validation maps brought every seed to 75.5–76.8 on those same test maps. Because that choice was made while looking at those maps, the results above come from 100 new ones.</p>
+    <p class="lead">The first version of this also lost. With a correction three times larger, three training seeds scored 49, 78 and 69 against the baseline's 74, and the cargo was shaken apart by rope jerk. Shrinking the correction and keeping the best checkpoint on validation maps brought every seed to 75.5–76.8 on those same test maps. Because that choice was made while looking at those maps, later results come from new ones.</p>
+    <p class="lead">Rope jerk was still the main source of damage, so the network was given peak rope tension and past frames as inputs, plus a penalty that starts before damage does. All three seeds beat the baseline, by 6.2 points on average (95% interval +4.3 to +8.5). Both changes went in together, so this does not show how much each one contributed. Three further runs then continued from the best seed at full difficulty, and the best of those is the policy shown here. On the maps above it gains 5.1 points (95% interval +3.6 to +6.8) over the model it replaced, with the same delivery rate.</p>
     <div class="flow" role="img" aria-label="Observations feed the baseline controller and the neural network. Their outputs are added and sent to the attitude controller, which drives the motors.">
-      <div class="box"><b>Observations</b>93 values: drone and cargo state, route, obstacle distances</div>
+      <div class="box"><b>Observations</b>123 values: drone and cargo state, route, obstacle distances, past frames</div>
       <div class="arrow">→</div>
       <div class="pair">
         <div class="box"><b>Baseline controller</b>Follows the planned route</div>
-        <div class="box learned"><b>Neural network</b>93 → 128 → 128 → 12, adds a bounded correction</div>
+        <div class="box learned"><b>Neural network</b>123 → 128 → 128 → 12, adds a bounded correction</div>
       </div>
       <div class="arrow">→</div>
       <div class="box"><b>Attitude controller</b>Turns thrust and rate commands into motor thrusts</div>
@@ -195,6 +196,10 @@
       <div><h3>Training</h3><p>PPO written from scratch, with 64 parallel environments and a curriculum that ramps up wind, gusts and map density.</p></div>
       <div><h3>Cargo health</h3><p>Starts at 100 and drops with rope jerks, high g-forces, impacts and ropes rubbing on obstacles.</p></div>
     </div>
+
+    <h3 style="margin-top:34px">What the network learned</h3>
+    <p class="lead">The analysis looks for neurons that track cargo swing, rope tension and obstacles, comparing each against untrained networks of the same shape. No single neuron beat them for swing or tension, and only a few did for obstacles.</p>
+    <p class="lead">Holding the top 32 tension-tuned neurons at their average while flying cost 3.5 points (95% interval −5.2 to −2.0) and raised rope-jerk damage from 7.6 to 10.8, against 0.9 and 1.2 points for two sets of neurons with similar influence. Swing neurons cost 2.6 points, but their controls cost 1.1 and 1.9, so that could be chance. Obstacle neurons cost no more than their controls. This is one model on 60 maps with two control sets per concept, so it is evidence, not proof.</p>
   </section>
 
   <section id="limits">
@@ -233,7 +238,7 @@ D.showcase.forEach((m, i) => {
   };
   $('picker').appendChild(b);
 });
-$('pickNote').textContent = `These are real flights from the test set, from ${seedName(D.replay_seed).toLowerCase()}. ` +
+$('pickNote').textContent = `These are real flights from the test set${C.seeds > 1 ? `, from ${seedName(D.replay_seed).toLowerCase()}` : ''}. ` +
   `The first ${D.showcase.length - 1} are the trained policy's best map in each theme, so they flatter it. ` +
   `The last is its worst map overall. The numbers below cover all ${C.maps} maps.`;
 
@@ -247,7 +252,8 @@ $('headline').textContent = {
 }[C.verdict];
 $('lead').textContent = `Both flew the same ${C.maps} maps, none of which were used for training or for choosing settings. ` +
   `A mission scores the cargo's health on delivery, and 0 if it fails. ` +
-  `The result only counts as a win if the 95% interval excludes zero and all ${plural(C.seeds, 'training seed')} agree.`;
+  (C.seeds > 1 ? `The result only counts as a win if the 95% interval excludes zero and all ${plural(C.seeds, 'training seed')} agree.`
+    : 'The 95% interval covers which maps were drawn, not training luck: this is one model, picked as the best of several runs.');
 const tiles = [
   ['Mean score', S.trained.toFixed(1), `baseline ${S.baseline.toFixed(1)}`],
   ['Difference in score', signed(S.diff), `95% interval ${signed(S.ci_low)} to ${signed(S.ci_high)}`],
@@ -312,7 +318,7 @@ function themeChart() {
 function seedChart() {
   const host = $('seedChart'); host.textContent = '';
   const seeds = Object.entries(S.seed_diffs);
-  const rows = [['All maps', S.diff, S.ci_low, S.ci_high], ...seeds.map(([k, v]) => [seedName(k), v])];
+  const rows = [['All maps', S.diff, S.ci_low, S.ci_high], ...(seeds.length > 1 ? seeds.map(([k, v]) => [seedName(k), v]) : [])];
   const W = host.clientWidth, rowH = 30, top = 8, left = 76, right = 14;
   const vals = [0, S.ci_low, S.ci_high, ...seeds.map(s => s[1])];
   const span = Math.max(...vals.map(Math.abs), 1), step = span > 20 ? 10 : span > 8 ? 5 : span > 3 ? 2 : 1;
@@ -331,12 +337,12 @@ function seedChart() {
     el(svg, 'circle', { cx: x(v), cy: y, r: i ? 5 : 6.5, fill: css('--trained'), stroke: css('--panel'), 'stroke-width': 2 });
     const hit = el(svg, 'rect', { class: 'hit', x: 0, y: y - rowH / 2, width: W, height: rowH });
     tooltip(hit, lo === undefined ? `${name}: ${signed(v)} points`
-      : `Mean of all seeds: ${signed(v)} points<br>95% interval ${signed(lo)} to ${signed(hi)}`);
+      : `${seeds.length > 1 ? 'Mean of all seeds' : 'Mean'}: ${signed(v)} points<br>95% interval ${signed(lo)} to ${signed(hi)}`);
   });
 }
 function drawCharts() { themeChart(); seedChart(); }
-$('themeCap').textContent = `Mean score, seeds pooled. The axis is zoomed in and does not start at zero. Each theme has only ${D.themes[0].maps} maps, so small gaps can be noise.`;
-$('seedCap').textContent = `Points right of zero favour the trained policy. The interval covers which maps were drawn, not training luck, which is why each seed is shown too.`;
+$('themeCap').textContent = `Mean score${C.seeds > 1 ? ', seeds pooled' : ''}. The axis is zoomed in and does not start at zero. Each theme has only ${D.themes[0].maps} maps, so small gaps can be noise.`;
+$('seedCap').textContent = `Points right of zero favour the trained policy. The interval covers which maps were drawn, not training luck${C.seeds > 1 ? ', which is why each seed is shown too' : ''}.`;
 drawCharts();
 let lastWidth = innerWidth;
 addEventListener('resize', () => { if (innerWidth !== lastWidth) { lastWidth = innerWidth; drawCharts(); } });
@@ -352,7 +358,7 @@ const rows = [
   ...Object.keys(T.damage).map(k => [`Damage: ${k}`, T.damage[k].toFixed(1), B.damage[k].toFixed(1)]),
   ['Failed missions', fails(T), fails(B)],
 ];
-$('detail').innerHTML = `<thead><tr><th>All ${C.maps} maps</th><th>Trained (${plural(C.seeds, 'seed')} pooled, ${T.missions} flights)</th><th>Baseline (${B.missions} flights)</th></tr></thead><tbody>` +
+$('detail').innerHTML = `<thead><tr><th>All ${C.maps} maps</th><th>Trained (${C.seeds > 1 ? `${plural(C.seeds, 'seed')} pooled, ` : ''}${T.missions} flights)</th><th>Baseline (${B.missions} flights)</th></tr></thead><tbody>` +
   rows.map(([a, t, b]) => `<tr><td>${a}</td><td class="wrapok">${t}</td><td class="wrapok">${b}</td></tr>`).join('') + '</tbody>';
 $('generated').textContent = D.generated;
 </script>
