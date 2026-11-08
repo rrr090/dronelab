@@ -175,13 +175,14 @@
 
     <h3 style="margin-top:34px">The learned correction</h3>
     <p class="lead">Learning to fly from nothing scored below the baseline, so the network now starts from it. With a zero correction the team flies exactly like the baseline, and training only has to find improvements.</p>
-    <p class="lead">The first version of this also lost. With a correction three times larger, three training seeds scored 49, 78 and 69 against the baseline's 74, and the cargo was shaken apart by rope jerk. Shrinking the correction and keeping the best checkpoint on validation maps brought every seed to 75.5–76.8 on those same test maps. Because that choice was made while looking at those maps, the results above come from 100 new ones.</p>
+    <p class="lead">The first version of this also lost. With a correction three times larger, three training seeds scored 49, 78 and 69 against the baseline's 74, and the cargo was shaken apart by rope jerk. Shrinking the correction and keeping the best checkpoint on validation maps brought every seed to 75.5–76.8 on those same test maps. Because that choice was made while looking at those maps, later results come from new ones.</p>
+    <p class="lead">Rope jerk was still the main source of damage, so the network was given peak rope tension and past frames as inputs, plus a penalty that starts before damage does. All three seeds beat the baseline, by 6.2 points on average (95% interval +4.3 to +8.5). Both changes went in together, so this does not show how much each one contributed. Three further runs then continued from the best seed at full difficulty, and the best of those is the policy shown here. On the maps above it gains 5.1 points (95% interval +3.6 to +6.8) over the model it replaced, with the same delivery rate.</p>
     <div class="flow" role="img" aria-label="Observations feed the baseline controller and the neural network. Their outputs are added and sent to the attitude controller, which drives the motors.">
-      <div class="box"><b>Observations</b>93 values: drone and cargo state, route, obstacle distances</div>
+      <div class="box"><b>Observations</b>123 values: drone and cargo state, route, obstacle distances, past frames</div>
       <div class="arrow">→</div>
       <div class="pair">
         <div class="box"><b>Baseline controller</b>Follows the planned route</div>
-        <div class="box learned"><b>Neural network</b>93 → 128 → 128 → 12, adds a bounded correction</div>
+        <div class="box learned"><b>Neural network</b>123 → 128 → 128 → 12, adds a bounded correction</div>
       </div>
       <div class="arrow">→</div>
       <div class="box"><b>Attitude controller</b>Turns thrust and rate commands into motor thrusts</div>
@@ -195,6 +196,10 @@
       <div><h3>Training</h3><p>PPO written from scratch, with 64 parallel environments and a curriculum that ramps up wind, gusts and map density.</p></div>
       <div><h3>Cargo health</h3><p>Starts at 100 and drops with rope jerks, high g-forces, impacts and ropes rubbing on obstacles.</p></div>
     </div>
+
+    <h3 style="margin-top:34px">What the network learned</h3>
+    <p class="lead">The analysis looks for neurons that track cargo swing, rope tension and obstacles, comparing each against untrained networks of the same shape. No single neuron beat them for swing or tension, and only a few did for obstacles.</p>
+    <p class="lead">Holding the top 32 tension-tuned neurons at their average while flying cost 3.5 points (95% interval −5.2 to −2.0) and raised rope-jerk damage from 7.6 to 10.8, against 0.9 and 1.2 points for two sets of neurons with similar influence. Swing neurons cost 2.6 points, but their controls cost 1.1 and 1.9, so that could be chance. Obstacle neurons cost no more than their controls. This is one model on 60 maps with two control sets per concept, so it is evidence, not proof.</p>
   </section>
 
   <section id="limits">
@@ -210,7 +215,7 @@ dronelab mission visualize --themes storm city --difficulty 1.0</pre>
 </div>
 
 <script>
-const D = {"comparison":{"maps":100,"seeds":3,"score":{"baseline":74.90175077617168,"trained":76.43987955754817,"diff":1.538128781376484,"ci_low":0.6441107424642957,"ci_high":2.4856198779290777,"seed_diffs":{"residual01_s0_best":2.6983029251221042,"residual01_s1_best":-0.2655681327779199,"residual01_s2_best":2.1816515517852673}},"delivered":{"baseline":0.91,"trained":0.92,"diff":0.009999999999999998,"ci_low":-0.013333333333333334,"ci_high":0.03333333333333333,"seed_diffs":{"residual01_s0_best":0.01,"residual01_s1_best":0.0,"residual01_s2_best":0.02}},"verdict":"no clear winner"},"summary":{"trained":{"missions":300,"delivered_rate":0.92,"mean_score":76.43987955754817,"health_if_delivered":83.08682560603062,"mean_time_s":42.1845652173913,"mean_track_err":0.11067574809210834,"damage":{"rope jerk":21.083751024472413,"g-force":2.0804196553174377,"impact":0.0,"rope rub":0.0},"failures":{"cargo destroyed":21,"drone hit obstacle":3}},"baseline":{"missions":100,"delivered_rate":0.91,"mean_score":74.90175077617168,"health_if_delivered":82.3096162375513,"mean_time_s":42.139120879120874,"mean_track_err":0.10781523517356875,"damage":{"rope jerk":22.42665786574428,"g-force":2.293997368650663,"impact":0.0,"rope rub":0.0},"failures":{"cargo destroyed":8,"drone hit obstacle":1}}},"themes":[{"theme":"forest","maps":20,"trained":83.63863290104209,"baseline":82.93705574502007,"trained_delivered":0.9666666666666667,"baseline_delivered":0.95},{"theme":"city","maps":20,"trained":76.51335603225908,"baseline":74.27391068746911,"trained_delivered":0.8833333333333333,"baseline_delivered":0.85},{"theme":"gates","maps":20,"trained":74.48146314998976,"baseline":72.94902937194487,"trained_delivered":0.9166666666666666,"baseline_delivered":0.95},{"theme":"storm","maps":20,"trained":70.2332202105567,"baseline":68.20650184091096,"trained_delivered":0.8666666666666667,"baseline_delivered":0.85},{"theme":"mixed","maps":20,"trained":77.33272549389316,"baseline":76.1422562355134,"trained_delivered":0.9666666666666667,"baseline_delivered":0.95}],"replay_seed":"residual01_s2_best","showcase":[{"theme":"storm","seed":6003109,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":75.9,"reason":""},"baseline":{"delivered":true,"score":53.5,"reason":""}},{"theme":"city","seed":6001109,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":22.2,"reason":""},"baseline":{"delivered":false,"score":0.0,"reason":"cargo destroyed"}},{"theme":"mixed","seed":6004003,"difficulty":0.5,"worst":false,"trained":{"delivered":true,"score":35.6,"reason":""},"baseline":{"delivered":true,"score":14.9,"reason":""}},{"theme":"gates","seed":6002107,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":87.3,"reason":""},"baseline":{"delivered":true,"score":68.1,"reason":""}},{"theme":"forest","seed":6000108,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":15.3,"reason":""},"baseline":{"delivered":false,"score":0.0,"reason":"cargo destroyed"}},{"theme":"gates","seed":6002109,"difficulty":1.0,"worst":true,"trained":{"delivered":false,"score":0.0,"reason":"cargo destroyed"},"baseline":{"delivered":true,"score":16.6,"reason":""}}],"generated":"2026-11-06"};
+const D = {"comparison":{"maps":100,"seeds":1,"score":{"baseline":77.96529538304225,"trained":91.09372696785775,"diff":13.128431584815484,"ci_low":9.582772775878727,"ci_high":17.16331595156798,"seed_diffs":{"chosen":13.128431584815484}},"delivered":{"baseline":0.95,"trained":0.98,"diff":0.03,"ci_low":-0.01,"ci_high":0.08,"seed_diffs":{"chosen":0.03}},"verdict":"trained policy beats the baseline"},"summary":{"trained":{"missions":100,"delivered_rate":0.98,"mean_score":91.09372696785775,"health_if_delivered":92.95278262026301,"mean_time_s":42.72632653061224,"mean_track_err":0.13646353345480908,"damage":{"rope jerk":8.283344944987231,"g-force":0.6793551049972945,"impact":0.0,"rope rub":0.0},"failures":{"cargo destroyed":2}},"baseline":{"missions":100,"delivered_rate":0.95,"mean_score":77.96529538304225,"health_if_delivered":82.06873198214974,"mean_time_s":42.45473684210526,"mean_track_err":0.10663489550739202,"damage":{"rope jerk":20.1197473247108,"g-force":2.0073072356456607,"impact":0.0,"rope rub":0.0},"failures":{"cargo destroyed":5}}},"themes":[{"theme":"forest","maps":20,"trained":93.39099931468014,"baseline":85.39085924269615,"trained_delivered":1.0,"baseline_delivered":1.0},{"theme":"city","maps":20,"trained":93.17576302889377,"baseline":78.3392905581409,"trained_delivered":1.0,"baseline_delivered":0.9},{"theme":"gates","maps":20,"trained":87.95992206171485,"baseline":74.0407905425234,"trained_delivered":0.95,"baseline_delivered":1.0},{"theme":"storm","maps":20,"trained":92.90756125575197,"baseline":81.8133168448053,"trained_delivered":1.0,"baseline_delivered":1.0},{"theme":"mixed","maps":20,"trained":88.03438917824798,"baseline":70.24221972704552,"trained_delivered":0.95,"baseline_delivered":0.85}],"replay_seed":"chosen","showcase":[{"theme":"city","seed":9701103,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":89.7,"reason":""},"baseline":{"delivered":false,"score":0.0,"reason":"cargo destroyed"}},{"theme":"mixed","seed":9704108,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":86.0,"reason":""},"baseline":{"delivered":false,"score":0.0,"reason":"cargo destroyed"}},{"theme":"gates","seed":9702100,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":91.2,"reason":""},"baseline":{"delivered":true,"score":27.4,"reason":""}},{"theme":"storm","seed":9703101,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":59.3,"reason":""},"baseline":{"delivered":true,"score":2.0,"reason":""}},{"theme":"forest","seed":9700100,"difficulty":1.0,"worst":false,"trained":{"delivered":true,"score":86.7,"reason":""},"baseline":{"delivered":true,"score":67.8,"reason":""}},{"theme":"gates","seed":9702101,"difficulty":1.0,"worst":true,"trained":{"delivered":true,"score":57.5,"reason":""},"baseline":{"delivered":true,"score":66.9,"reason":""}}],"generated":"2026-11-08"};
 const $ = id => document.getElementById(id);
 const C = D.comparison, S = C.score, DL = C.delivered, T = D.summary.trained, B = D.summary.baseline;
 const pct = v => `${Math.round(v * 100)}%`;
@@ -233,7 +238,7 @@ D.showcase.forEach((m, i) => {
   };
   $('picker').appendChild(b);
 });
-$('pickNote').textContent = `These are real flights from the test set, from ${seedName(D.replay_seed).toLowerCase()}. ` +
+$('pickNote').textContent = `These are real flights from the test set${C.seeds > 1 ? `, from ${seedName(D.replay_seed).toLowerCase()}` : ''}. ` +
   `The first ${D.showcase.length - 1} are the trained policy's best map in each theme, so they flatter it. ` +
   `The last is its worst map overall. The numbers below cover all ${C.maps} maps.`;
 
@@ -247,7 +252,8 @@ $('headline').textContent = {
 }[C.verdict];
 $('lead').textContent = `Both flew the same ${C.maps} maps, none of which were used for training or for choosing settings. ` +
   `A mission scores the cargo's health on delivery, and 0 if it fails. ` +
-  `The result only counts as a win if the 95% interval excludes zero and all ${plural(C.seeds, 'training seed')} agree.`;
+  (C.seeds > 1 ? `The result only counts as a win if the 95% interval excludes zero and all ${plural(C.seeds, 'training seed')} agree.`
+    : 'The 95% interval covers which maps were drawn, not training luck: this is one model, picked as the best of several runs.');
 const tiles = [
   ['Mean score', S.trained.toFixed(1), `baseline ${S.baseline.toFixed(1)}`],
   ['Difference in score', signed(S.diff), `95% interval ${signed(S.ci_low)} to ${signed(S.ci_high)}`],
@@ -312,7 +318,7 @@ function themeChart() {
 function seedChart() {
   const host = $('seedChart'); host.textContent = '';
   const seeds = Object.entries(S.seed_diffs);
-  const rows = [['All maps', S.diff, S.ci_low, S.ci_high], ...seeds.map(([k, v]) => [seedName(k), v])];
+  const rows = [['All maps', S.diff, S.ci_low, S.ci_high], ...(seeds.length > 1 ? seeds.map(([k, v]) => [seedName(k), v]) : [])];
   const W = host.clientWidth, rowH = 30, top = 8, left = 76, right = 14;
   const vals = [0, S.ci_low, S.ci_high, ...seeds.map(s => s[1])];
   const span = Math.max(...vals.map(Math.abs), 1), step = span > 20 ? 10 : span > 8 ? 5 : span > 3 ? 2 : 1;
@@ -331,12 +337,12 @@ function seedChart() {
     el(svg, 'circle', { cx: x(v), cy: y, r: i ? 5 : 6.5, fill: css('--trained'), stroke: css('--panel'), 'stroke-width': 2 });
     const hit = el(svg, 'rect', { class: 'hit', x: 0, y: y - rowH / 2, width: W, height: rowH });
     tooltip(hit, lo === undefined ? `${name}: ${signed(v)} points`
-      : `Mean of all seeds: ${signed(v)} points<br>95% interval ${signed(lo)} to ${signed(hi)}`);
+      : `${seeds.length > 1 ? 'Mean of all seeds' : 'Mean'}: ${signed(v)} points<br>95% interval ${signed(lo)} to ${signed(hi)}`);
   });
 }
 function drawCharts() { themeChart(); seedChart(); }
-$('themeCap').textContent = `Mean score, seeds pooled. The axis is zoomed in and does not start at zero. Each theme has only ${D.themes[0].maps} maps, so small gaps can be noise.`;
-$('seedCap').textContent = `Points right of zero favour the trained policy. The interval covers which maps were drawn, not training luck, which is why each seed is shown too.`;
+$('themeCap').textContent = `Mean score${C.seeds > 1 ? ', seeds pooled' : ''}. The axis is zoomed in and does not start at zero. Each theme has only ${D.themes[0].maps} maps, so small gaps can be noise.`;
+$('seedCap').textContent = `Points right of zero favour the trained policy. The interval covers which maps were drawn, not training luck${C.seeds > 1 ? ', which is why each seed is shown too' : ''}.`;
 drawCharts();
 let lastWidth = innerWidth;
 addEventListener('resize', () => { if (innerWidth !== lastWidth) { lastWidth = innerWidth; drawCharts(); } });
@@ -352,7 +358,7 @@ const rows = [
   ...Object.keys(T.damage).map(k => [`Damage: ${k}`, T.damage[k].toFixed(1), B.damage[k].toFixed(1)]),
   ['Failed missions', fails(T), fails(B)],
 ];
-$('detail').innerHTML = `<thead><tr><th>All ${C.maps} maps</th><th>Trained (${plural(C.seeds, 'seed')} pooled, ${T.missions} flights)</th><th>Baseline (${B.missions} flights)</th></tr></thead><tbody>` +
+$('detail').innerHTML = `<thead><tr><th>All ${C.maps} maps</th><th>Trained (${C.seeds > 1 ? `${plural(C.seeds, 'seed')} pooled, ` : ''}${T.missions} flights)</th><th>Baseline (${B.missions} flights)</th></tr></thead><tbody>` +
   rows.map(([a, t, b]) => `<tr><td>${a}</td><td class="wrapok">${t}</td><td class="wrapok">${b}</td></tr>`).join('') + '</tbody>';
 $('generated').textContent = D.generated;
 </script>

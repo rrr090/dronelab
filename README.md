@@ -40,7 +40,7 @@
 |---|---|---|
 | **hover** | One planar quadrotor holds a hover point under pushes and motor faults. | 6 → 2 motor thrusts |
 | **cargo** | Three 3D quadrotors hold one cargo on ropes under gusts, wind, motor faults and cargo kicks. | 63 → 12 attitude commands |
-| **mission** | The team flies the cargo through a generated map to a goal pad. Score = cargo health on delivery. | 93 → 12 attitude commands |
+| **mission** | The team flies the cargo through a generated map to a goal pad. Score = cargo health on delivery. | 123 → 12 attitude commands |
 
 Each stage builds on the one before it.
 
@@ -126,7 +126,7 @@ The policy acts at 50 Hz. For each drone it outputs collective thrust, roll, pit
 
 - **Algorithm:** PPO (`dronelab/ppo.py`) with observation normalization, GAE and learning-rate decay.
 - **Curriculum:** domain randomization ramps from calm to full difficulty over the first 60% of training. It covers wind, gusts, cargo mass, rope length, motor wear, sensor noise and map density.
-- **Residual missions:** the formation baseline keeps flying the route. The network learns a bounded correction on top of it, so training starts at the baseline's level instead of from zero.
+- **Residual missions:** the formation baseline keeps flying the route. The network learns a bounded correction on top of it, so training starts at the baseline's level instead of from zero. The chosen policy also sees peak rope tension and past frames, and is penalised as tension nears the damage level.
 - **Checkpoint selection:** the best network is chosen on validation maps, which are separate from the training and test maps.
 
 </details>
@@ -147,16 +147,16 @@ Results from `dronelab cargo evaluate`, 8 episodes per scenario, after 400 train
 
 ### Missions
 
-Results on 100 unseen maps, with the three training seeds pooled. The maps were not used for training or for choosing settings:
+The chosen policy on 100 new maps, used only for this final report and not for training or for choosing a model:
 
-| | Trained policy | Formation baseline |
+| | Chosen policy | Formation baseline |
 |---|---|---|
-| Average score | **76.4** | 74.9 |
-| Delivered | 92% | 91% |
-| Cargo health when delivered | **83.1** | 82.3 |
-| Rope-jerk damage | **21.1** | 22.4 |
+| Average score | **91.1** | 78.0 |
+| Delivered | **98%** | 95% |
+| Cargo health when delivered | **93.0** | 82.1 |
+| Rope-jerk damage | **8.3** | 20.1 |
 
-The gain is real on average but small: **+1.5 points, 95% interval +0.6 to +2.5**, paired map by map, and the policy scores higher on all five map themes. It does not pass the project's strict test for a win, because the seeds disagree: two gain 2.7 and 2.2 points, and the third loses 0.3. The change in delivery rate (+1 point, interval −1.3 to +3.3) could be noise.
+The policy gains **+13.1 points, 95% interval +9.6 to +17.2**, paired map by map, and scores higher on 96 of the 100 maps. Flight time is 42.7 s against 42.5 s, so the gain does not come from flying slower. The interval covers which maps were drawn, not training luck: this is one model, picked as the best of several runs. Scores from different map sets are not comparable, because some sets are easier.
 
 How it got here:
 
@@ -165,11 +165,33 @@ How it got here:
 | Full actions, no baseline | 64.9 vs 74.2 | 69% vs 89% | test set |
 | Residual, correction 0.3 | 65.4 vs 74.2 (seeds 49, 78, 69) | 83% vs 89% | test set |
 | Residual, correction 0.1, best validation checkpoint | 76.0 vs 74.2 | 91% vs 89% | test set |
-| Same policy, reported result | 76.4 vs 74.9 | 92% vs 91% | 100 new maps |
+| Same policy, on new maps | 76.4 vs 74.9 | 92% vs 91% | 100 new maps |
+| History inputs and rope-jerk penalty, three seeds | 79.1 vs 72.9 | 96% vs 94% | 100 new maps |
+| Best of those seeds, trained further (chosen policy) | 91.1 vs 78.0 | 98% vs 95% | 100 new maps |
 
-Building on the baseline removed most obstacle crashes, but a large correction shook the cargo apart through rope jerk. The correction size was chosen after seeing the test set, so the final numbers come from new maps. To reproduce them, train three seeds and run `dronelab mission evaluate --seed 6000000 --checkpoint ...`.
+Building on the baseline removed most obstacle crashes, but a large correction shook the cargo apart through rope jerk, so the correction was made smaller. Rope jerk was still the main source of damage, so the policy was given peak tension and past frames as inputs, plus a penalty that starts before damage does. All three seeds beat the baseline, by +6.2 points on average (interval +4.3 to +8.5). Both changes went in together, so this does not show how much each one contributed.
+
+Three further training runs then continued from the best seed at full difficulty. All three beat their starting point on unused maps. The best was promoted, and on the final maps it gains **+5.1 points (interval +3.6 to +6.8)** over the model it replaced, with the same delivery rate: the cargo simply arrives in better condition. Each step was judged on maps not used for the previous one.
+
+To reproduce the steps:
+
+```bash
+dronelab mission train --history --jerk-weight 1.0 --seed 1 --out checkpoints/jerk_s1.pt
+dronelab mission train --resume checkpoints/jerk_s1_best.pt --curriculum 0 --critic-warmup 0 --lr 5e-5 --seed 0 --out checkpoints/champ_s0.pt
+dronelab mission evaluate --checkpoint checkpoints/champ_s0_best.pt --seed 9700000
+```
 
 ![Mission viewer, city map](docs/images/mission-city.png)
+
+### What the network learned
+
+`dronelab mission interpret` looks for neurons that track cargo swing, rope tension and obstacles, always compared with untrained networks of the same shape. The answers below are for the chosen policy:
+
+- **Single neurons mostly do not track these concepts.** No neuron beats the untrained networks for swing or tension. Obstacles are the exception, with 1 neuron in the first hidden layer and 5 in the second.
+- **Tension-tuned neurons have a measurable effect in flight.** Holding the top 32 at their average costs **3.5 points** (interval −5.2 to −2.0) and raises rope-jerk damage from 7.6 to 10.8, against 0.9 and 1.2 points for two sets of neurons with similar influence.
+- **Swing is unclear, and obstacles show nothing.** Swing neurons cost 2.6 points (interval −4.1 to −1.4), but their controls cost 1.1 and 1.9, so that could be chance. Removing obstacle neurons costs 0.6 points, no more than the controls, and clearance does not change.
+
+This is one model, 60 maps and two control sets per concept, so treat it as evidence, not proof.
 
 ## Project layout
 
@@ -206,11 +228,11 @@ CI runs the suite on every push.
 - [x] Planar hover with disturbance test suite
 - [x] Three-drone 3D cargo hold under gusts and faults
 - [x] Procedural missions with route planning and cargo health
-- [x] Residual mission policy with a small average gain over the baseline
+- [x] Residual mission policy that clearly beats the baseline
 - [x] Project site with 3D replays and measured results
+- [x] Interpretability: find and ablate the neurons that track cargo swing, rope tension and obstacles
 - [ ] GPU-vectorized physics in PyTorch, for thousands of parallel environments
 - [ ] Realism: motor lag, state-estimation noise, a rigid-body cargo, direct motor control
-- [ ] Interpretability: find and ablate the neurons that track cargo swing, rope tension and obstacles
 
 ## Limitations
 
