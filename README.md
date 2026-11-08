@@ -173,6 +173,13 @@ Building on the baseline removed most obstacle crashes, but a large correction s
 
 Three further training runs then continued from the best seed at full difficulty. All three beat their starting point on unused maps. The best was promoted, and on the final maps it gains **+5.1 points (interval +3.6 to +6.8)** over the model it replaced, with the same delivery rate: the cargo simply arrives in better condition. Each step was judged on maps not used for the previous one.
 
+The chosen policy is available as a [release download](https://github.com/rrr090/dronelab/releases/tag/v0.1.0), so the final result can be checked without training:
+
+```bash
+curl -L --create-dirs -o checkpoints/chosen.pt https://github.com/rrr090/dronelab/releases/download/v0.1.0/chosen.pt
+dronelab mission evaluate --checkpoint checkpoints/chosen.pt --seed 9700000
+```
+
 To reproduce the steps:
 
 ```bash
@@ -230,7 +237,8 @@ CI runs the suite on every push.
 - [x] Procedural missions with route planning and cargo health
 - [x] Residual mission policy that clearly beats the baseline
 - [x] Project site with 3D replays and measured results
-- [x] Interpretability: find and ablate the neurons that track cargo swing, rope tension and obstacles
+- [x] Interpretability, first pass: test for neurons tracking swing, tension and obstacles, and ablate them in flight (one model)
+- [ ] Interpretability: replicate the rope-tension effect across models
 - [ ] GPU-vectorized physics in PyTorch, for thousands of parallel environments
 - [ ] Realism: motor lag, state-estimation noise, a rigid-body cargo, direct motor control
 
