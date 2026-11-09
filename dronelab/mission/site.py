@@ -31,7 +31,7 @@ TEMPLATE = Path(__file__).with_name("site.html")
 IMAGES = Path(__file__).parents[2] / "docs" / "images"
 PAGE_IMAGES = ("hover-lanes.png", "cargo-storm.png", "mission-forest.png")
 SEEDS = ["checkpoints/chosen.pt"]
-REPORT_SEED = 9_700_000          # maps never used for training or for choosing a model
+REPORT_SEED = 10_500_000         # maps never used for training or for choosing a model
 
 
 def median_seed(runs: dict[str, Sequence[MissionResult]]) -> str:

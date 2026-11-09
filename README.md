@@ -151,12 +151,12 @@ The chosen policy on 100 new maps, used only for this final report and not for t
 
 | | Chosen policy | Formation baseline |
 |---|---|---|
-| Average score | **91.1** | 78.0 |
-| Delivered | **98%** | 95% |
-| Cargo health when delivered | **93.0** | 82.1 |
-| Rope-jerk damage | **8.3** | 20.1 |
+| Average score | **92.9** | 76.7 |
+| Delivered | **99%** | 95% |
+| Cargo health when delivered | **93.9** | 80.8 |
+| Rope-jerk damage | **6.6** | 21.5 |
 
-The policy gains **+13.1 points, 95% interval +9.6 to +17.2**, paired map by map, and scores higher on 96 of the 100 maps. Flight time is 42.7 s against 42.5 s, so the gain does not come from flying slower. The interval covers which maps were drawn, not training luck: this is one model, picked as the best of several runs. Scores from different map sets are not comparable, because some sets are easier.
+The policy gains **+16.2 points, 95% interval +12.8 to +20.0**, paired map by map, and scores higher on 96 of the 100 maps. Flight time is 43.6 s against 43.3 s, so the gain does not come from flying slower. The interval covers which maps were drawn, not training luck: this is one model, picked as the best of several runs. Scores from different map sets are not comparable, because some sets are easier.
 
 How it got here:
 
@@ -167,17 +167,20 @@ How it got here:
 | Residual, correction 0.1, best validation checkpoint | 76.0 vs 74.2 | 91% vs 89% | test set |
 | Same policy, on new maps | 76.4 vs 74.9 | 92% vs 91% | 100 new maps |
 | History inputs and rope-jerk penalty, three seeds | 79.1 vs 72.9 | 96% vs 94% | 100 new maps |
-| Best of those seeds, trained further (chosen policy) | 91.1 vs 78.0 | 98% vs 95% | 100 new maps |
+| Best of those seeds, trained further | 91.1 vs 78.0 | 98% vs 95% | 100 new maps |
+| That policy, trained further (chosen policy) | 92.9 vs 76.7 | 99% vs 95% | 100 new maps |
 
 Building on the baseline removed most obstacle crashes, but a large correction shook the cargo apart through rope jerk, so the correction was made smaller. Rope jerk was still the main source of damage, so the policy was given peak tension and past frames as inputs, plus a penalty that starts before damage does. All three seeds beat the baseline, by +6.2 points on average (interval +4.3 to +8.5). Both changes went in together, so this does not show how much each one contributed.
 
 Three further training runs then continued from the best seed at full difficulty. All three beat their starting point on unused maps. The best was promoted, and on the final maps it gains **+5.1 points (interval +3.6 to +6.8)** over the model it replaced, with the same delivery rate: the cargo simply arrives in better condition. Each step was judged on maps not used for the previous one.
 
-The chosen policy is available as a [release download](https://github.com/rrr090/dronelab/releases/tag/v0.1.0), so the final result can be checked without training:
+Six more runs continued from that model, three of them with a doubled rope-jerk penalty. All six beat it on unused maps, and doubling the penalty added nothing. The best of the six is the current chosen policy. On the final maps it gains **+2.8 points (interval +1.7 to +4.4)** over the model it replaced, mostly through less rope jerk (6.6 against 9.2).
+
+The chosen policy is available as a [release download](https://github.com/rrr090/dronelab/releases/tag/v0.2.0), so the final result can be checked without training:
 
 ```bash
-curl -L --create-dirs -o checkpoints/chosen.pt https://github.com/rrr090/dronelab/releases/download/v0.1.0/chosen.pt
-dronelab mission evaluate --checkpoint checkpoints/chosen.pt --seed 9700000
+curl -L --create-dirs -o checkpoints/chosen.pt https://github.com/rrr090/dronelab/releases/download/v0.2.0/chosen.pt
+dronelab mission evaluate --checkpoint checkpoints/chosen.pt --seed 10500000
 ```
 
 To reproduce the steps:
@@ -185,7 +188,8 @@ To reproduce the steps:
 ```bash
 dronelab mission train --history --jerk-weight 1.0 --seed 1 --out checkpoints/jerk_s1.pt
 dronelab mission train --resume checkpoints/jerk_s1_best.pt --curriculum 0 --critic-warmup 0 --lr 5e-5 --seed 0 --out checkpoints/champ_s0.pt
-dronelab mission evaluate --checkpoint checkpoints/champ_s0_best.pt --seed 9700000
+dronelab mission train --resume checkpoints/champ_s0_best.pt --curriculum 0 --critic-warmup 0 --lr 5e-5 --seed 0 --out checkpoints/next_s0.pt
+dronelab mission evaluate --checkpoint checkpoints/next_s0_best.pt --seed 10500000
 ```
 
 ![Mission viewer, city map](docs/images/mission-city.png)
@@ -194,9 +198,9 @@ dronelab mission evaluate --checkpoint checkpoints/champ_s0_best.pt --seed 97000
 
 `dronelab mission interpret` looks for neurons that track cargo swing, rope tension and obstacles, always compared with untrained networks of the same shape. The answers below are for the chosen policy:
 
-- **Single neurons mostly do not track these concepts.** No neuron beats the untrained networks for swing or tension. Obstacles are the exception, with 1 neuron in the first hidden layer and 5 in the second.
-- **Tension-tuned neurons have a measurable effect in flight.** Holding the top 32 at their average costs **3.5 points** (interval −5.2 to −2.0) and raises rope-jerk damage from 7.6 to 10.8, against 0.9 and 1.2 points for two sets of neurons with similar influence.
-- **Swing is unclear, and obstacles show nothing.** Swing neurons cost 2.6 points (interval −4.1 to −1.4), but their controls cost 1.1 and 1.9, so that could be chance. Removing obstacle neurons costs 0.6 points, no more than the controls, and clearance does not change.
+- **Single neurons mostly do not track these concepts.** No neuron beats the untrained networks for swing or tension. Obstacles are the exception, with 1 neuron in the first hidden layer and 6 in the second.
+- **Tension-tuned neurons have a measurable effect in flight.** Holding the top 32 at their average costs **2.3 points** (interval −3.6 to −1.2) and raises rope-jerk damage from 5.8 to 8.0, against 0.7 points for each of two sets of neurons with similar influence. The previous chosen model showed the same pattern (3.5 points against 0.9 and 1.2), but the current one was trained from it, so this is not an independent replication.
+- **Swing is suggestive, and obstacles show nothing.** Swing neurons cost 1.9 points (interval −3.1 to −0.9), against no loss and 0.8 points for their controls. In the previous model the swing effect could not be told apart from its controls, so this needs more models. Removing obstacle neurons costs 0.1 points, less than the controls, and clearance does not change.
 
 This is one model, 60 maps and two control sets per concept, so treat it as evidence, not proof.
 
