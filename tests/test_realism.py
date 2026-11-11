@@ -138,6 +138,26 @@ def test_realism_without_payload_spread_keeps_the_training_mass():
     assert env.cargo_mass.std() > 0.05 and env.rope_len.std() > 0.02
 
 
+def test_realism_training_resumes_with_its_preset_and_validates_both_ways(tmp_path, monkeypatch):
+    import torch
+    from dronelab.mission import train
+    from dronelab.mission.env import MISSION_OBS_DIM
+    from dronelab.policy import ActorCritic
+    model = ActorCritic(hidden=16, obs_dim=MISSION_OBS_DIM, act_dim=ACT_DIM, obs_norm=True, init_log_std=-1.0)
+    line = train.make_eval(0.1, str(tmp_path / "best.pt"), maps=_easy_maps(1), realism=PRESETS["realistic"])(model, "cpu")
+    assert "realism: delivered" in line and "new best" in line
+
+    monkeypatch.setattr(train, "make_eval", lambda *a, **k: None)
+    tiny = ["--updates", "1", "--envs", "2", "--steps", "8", "--hidden", "8", "--critic-warmup", "0"]
+    first, second = str(tmp_path / "a.pt"), str(tmp_path / "b.pt")
+    train.main(tiny + ["--realism", "realistic", "--out", first])
+    train.main(tiny + ["--resume", first, "--realism-max", "1.5", "--out", second])
+    ck = torch.load(second, map_location="cpu")
+    assert ck["realism"] == "realistic" and ck["realism_max"] == 1.5
+    train.main(tiny + ["--resume", first, "--realism", "none", "--out", second])
+    assert torch.load(second, map_location="cpu")["realism"] == "none"
+
+
 def test_single_effects_at_a_named_preset_level():
     assert condition("latency@realistic") == Realism(latency=PRESETS["realistic"].latency)
     assert condition("wind_scale@harsh") == condition("wind_scale")

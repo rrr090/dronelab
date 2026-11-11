@@ -27,6 +27,14 @@ Usage:
     dronelab mission train --resume checkpoints/chosen.pt --curriculum 0 --critic-warmup 0 --lr 5e-5
     dronelab mission train --resume checkpoints/chosen.pt --spike-weight 1.0 --curriculum 0 --critic-warmup 0 --lr 5e-5
     dronelab mission train --resume checkpoints/chosen.pt --privileged --curriculum 0 --critic-warmup 10 --lr 5e-5
+    dronelab mission train --resume checkpoints/chosen.pt --realism realistic --curriculum 0 --critic-warmup 0 --lr 5e-5
+    dronelab mission train --resume checkpoints/chosen.pt --realism realistic --realism-max 1.5 --lr 5e-5 --curriculum 0
+
+--realism PRESET trains with the hardware effects of `mission stress` (motor lag, delay,
+sensor noise, battery sag, ...) at a random strength per episode, from none to the full
+preset (--realism-max 1.5: up to 1.5x the preset, so the full preset is mid-range rather
+than the hardest case seen). The best checkpoint is then picked on the mean of the validation score with and
+without the preset, so gains under realism cannot hide a loss on the default hardware.
 """
 from __future__ import annotations
 
@@ -38,13 +46,16 @@ import torch
 
 from dronelab.cargo.env import ACT_DIM
 from dronelab.mission.env import HISTORY_DIM, MISSION_OBS_DIM, PRIV_DIM, MissionEnv, compose_residual
+from dronelab.mission.stress import PRESETS
 from dronelab.mission.testing import mission_maps, run_missions, summarize_missions
 from dronelab.ppo import add_ppo_args, save, train_ppo
 
 VALIDATION_SEED = 4_000_000      # between the training (< 1e6) and test (5e6) map seeds
 
 
-def make_eval(residual=0.0, best_path=None, maps=None, history=False, extra=None):
+def make_eval(residual=0.0, best_path=None, maps=None, history=False, extra=None, realism=None):
+    """With ``realism`` the validation maps are flown twice, default and with the full
+    preset, and the best checkpoint is chosen on the mean of the two scores."""
     maps = maps or mission_maps(difficulties=(0.5, 1.0), per=3, seed=VALIDATION_SEED)   # 30 maps
     best = -np.inf
 
@@ -60,12 +71,17 @@ def make_eval(residual=0.0, best_path=None, maps=None, history=False, extra=None
         pol = P(); pol.batched = batched; pol.history = history
         s = summarize_missions(run_missions(pol, maps))
         fails = ", ".join(f"{k} x{v}" for k, v in s["failures"].items()) or "none"
-        improved = best_path is not None and s["mean_score"] > best
+        score, tail = s["mean_score"], ""
+        if realism is not None:
+            r = summarize_missions(run_missions(pol, maps, realism=realism))
+            score = (s["mean_score"] + r["mean_score"]) / 2
+            tail = f" | realism: delivered {r['delivered_rate']:.0%} score {r['mean_score']:.1f} | mean {score:.1f}"
+        improved = best_path is not None and score > best
         if improved:
-            best = s["mean_score"]
+            best = score
             save(model, best_path, {"residual": residual, "validation_score": best, **(extra or {})})
         return (f"delivered {s['delivered_rate']:.0%} | score {s['mean_score']:.1f} "
-                f"| health {s['health_if_delivered']:.1f} | failures: {fails}"
+                f"| health {s['health_if_delivered']:.1f} | failures: {fails}" + tail
                 + (" | new best" if improved else ""))
     return quick_eval
 
@@ -143,6 +159,12 @@ def main(argv=None):
     p.add_argument("--privileged", action="store_true",
                    help="give the critic its own network with wind, gust and cargo state; "
                         "the policy's inputs do not change")
+    p.add_argument("--realism", default=None, choices=["none", *PRESETS],
+                   help="train with this stress preset at a random strength per episode "
+                        "(default none, or the value saved in the --resume checkpoint)")
+    p.add_argument("--realism-max", type=float, default=None,
+                   help="largest strength drawn, as a multiple of the preset "
+                        "(default 1, or the value saved in the --resume checkpoint)")
     args = p.parse_args(argv)
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
@@ -153,10 +175,18 @@ def main(argv=None):
             args.jerk_weight = float(ckpt.get("jerk_weight", 0.0))
         if args.spike_weight is None:
             args.spike_weight = float(ckpt.get("spike_weight", 0.0))
+        if args.realism is None:
+            args.realism = ckpt.get("realism", "none")
+        if args.realism_max is None:
+            args.realism_max = float(ckpt.get("realism_max", 1.0))
     args.jerk_weight = args.jerk_weight or 0.0
     args.spike_weight = args.spike_weight or 0.0
+    args.realism = args.realism or "none"
+    args.realism_max = args.realism_max or 1.0
+    realism = PRESETS.get(args.realism)
     env = MissionEnv(args.envs, seed=args.seed, difficulty=0.0, autoreset=True, residual=args.residual,
-                     history=args.history, jerk_weight=args.jerk_weight, spike_weight=args.spike_weight)
+                     history=args.history, jerk_weight=args.jerk_weight, spike_weight=args.spike_weight,
+                     realism=realism, realism_random=realism is not None, realism_max=args.realism_max)
     if args.resume:
         init = None
     elif args.residual > 0:
@@ -165,12 +195,14 @@ def main(argv=None):
         init = warm_start_from(args.init_from, args.init_std or 0.12)
     else:
         init = None
-    print(f"mode: {'residual x%.2f' % args.residual if args.residual > 0 else 'full actions'}")
+    print(f"mode: {'residual x%.2f' % args.residual if args.residual > 0 else 'full actions'}"
+          + (f", realism {args.realism} at random strength up to x{args.realism_max:g}" if realism else ""))
     best_path = "{}_best{}".format(*os.path.splitext(args.out))
-    extra = {"jerk_weight": args.jerk_weight, "spike_weight": args.spike_weight}
+    extra = {"jerk_weight": args.jerk_weight, "spike_weight": args.spike_weight, "realism": args.realism,
+             "realism_max": args.realism_max}
     obs_dim = MISSION_OBS_DIM + (HISTORY_DIM if args.history else 0)
     train_ppo(args, env, obs_dim, ACT_DIM,
-              eval_fn=make_eval(args.residual, best_path, history=args.history, extra=extra),
+              eval_fn=make_eval(args.residual, best_path, history=args.history, extra=extra, realism=realism),
               episode_stat=episode_stat, model_init=init,
               save_extra={"residual": args.residual, **extra},
               priv_dim=PRIV_DIM if args.privileged else 0)
