@@ -54,9 +54,10 @@ def _batched(policy):
 
 
 def run_missions(policy: Policy, maps: Sequence[MissionMap], cruise: float = 1.0,
-                 record: bool = False, seed: int = 0) -> list[MissionResult]:
+                 record: bool = False, seed: int = 0, realism=None) -> list[MissionResult]:
     B = len(maps)
-    env = MissionEnv(B, seed=seed, maps=list(maps), cruise=cruise, history=getattr(policy, "history", False))
+    env = MissionEnv(B, seed=seed, maps=list(maps), cruise=cruise, history=getattr(policy, "history", False),
+                     realism=realism)
     obs = env.reset()
     act = _batched(policy)
     alive = np.ones(B, dtype=bool)

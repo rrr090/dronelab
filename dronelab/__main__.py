@@ -4,7 +4,7 @@
     python -m dronelab <task> <command> [options]
 
 Tasks:     hover, cargo, mission
-Commands:  train, evaluate, visualize (plus mission site and mission interpret)
+Commands:  train, evaluate, visualize (plus mission site, interpret and stress)
 
 Run ``dronelab <task> <command> --help`` for the options of each command.
 """
@@ -19,7 +19,7 @@ TASKS = {
     "mission": "the cargo team flying through generated maps",
 }
 COMMANDS = ("train", "evaluate", "visualize")
-EXTRA_COMMANDS = {"mission": ("site", "interpret")}
+EXTRA_COMMANDS = {"mission": ("site", "interpret", "stress")}
 
 
 def main(argv=None) -> int:

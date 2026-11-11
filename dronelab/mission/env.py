@@ -32,7 +32,7 @@ import numpy as np
 
 from dronelab.mission import maps as M
 from dronelab.cargo.env import (
-    CARGO_MASS, DT, G, OBS_DIM, PAIRS, CargoEnv, Conditions,
+    CARGO_MASS, DT, G, OBS_DIM, PAIRS, CargoEnv, Conditions, Realism,
 )
 from dronelab.cargo.testing import FormationController
 
@@ -98,7 +98,8 @@ class MissionEnv(CargoEnv):
     def __init__(self, num_envs: int = 1, seed: int | None = None, difficulty: float | None = None,
                  themes=None, maps=None, autoreset: bool = False, cruise: float | None = None,
                  conditions: Conditions | None = None, pool_size: int = 40, residual: float = 0.0,
-                 history: bool = False, jerk_weight: float = 0.0, spike_weight: float = 0.0):
+                 history: bool = False, jerk_weight: float = 0.0, spike_weight: float = 0.0,
+                 realism: Realism | None = None, realism_random: bool = False, realism_max: float = 1.0):
         """Training: pass ``difficulty`` (0..1) to draw random maps and conditions.
         Evaluation: pass ``maps`` (one MissionMap per env) and optionally ``conditions``.
         ``residual > 0``: actions are corrections added to the formation baseline,
@@ -106,7 +107,11 @@ class MissionEnv(CargoEnv):
         ``history``: add the HISTORY_DIM inputs described at the top of this file.
         ``jerk_weight``: penalise rope tension above JERK_WARNING, before it does damage.
         ``spike_weight``: quadratic penalty on tension above the damage level, capped at SPIKE_CAP,
-        because a few large peaks cause most of the rope damage."""
+        because a few large peaks cause most of the rope damage.
+        ``realism``: hardware effects left out by default (see cargo.env.Realism). Sensor noise
+        and bias reach the whole observation, so the baseline inside a residual policy sees them too.
+        ``realism_random``: each episode meets ``realism`` at a random strength in
+        [0, realism_max] (training)."""
         self.residual = residual
         self.history, self.jerk_weight, self.spike_weight = history, jerk_weight, spike_weight
         self.past = np.zeros((num_envs, max(HISTORY_LAGS) + 1, HISTORY_FEATURES))
@@ -130,8 +135,10 @@ class MissionEnv(CargoEnv):
         self.step_damage = np.zeros(B); self.impact_event = np.zeros(B, dtype=bool)
         self.cyl_l = np.zeros((B, NC_LOCAL, 4)); self.box_l = np.zeros((B, NB_LOCAL, 6))
         self._cache = None
+        self.sensor_bias = np.zeros((B, MISSION_OBS_DIM + (HISTORY_DIM if history else 0)))
         super().__init__(num_envs, seed=seed, conditions=conditions or Conditions(init_noise=0.05),
-                         difficulty=difficulty, autoreset=autoreset, max_steps=10 ** 9)
+                         difficulty=difficulty, autoreset=autoreset, max_steps=10 ** 9, realism=realism,
+                         realism_random=realism_random, realism_max=realism_max)
 
     # ------------------------------------------------------------ maps
     def _draw_map(self):
@@ -183,6 +190,8 @@ class MissionEnv(CargoEnv):
             m = self.fixed_maps[i] if self.fixed_maps is not None else self._draw_map()
             self._load_map(i, m)
             self.target[i] = m.path[0]
+        if self.realism.sensor_bias > 0:
+            self.sensor_bias[idx] = self.real_rng.normal(size=(len(idx), self.sensor_bias.shape[1]))                 * self.realism.sensor_bias
         super().reset(idx)
         for i in idx:
             self.gust_std[i] = self.map_info[i].gust_std
@@ -216,7 +225,7 @@ class MissionEnv(CargoEnv):
         steady, turb = M.zone_wind(bodies, self.zones)
         decay = np.exp(-DT / 0.4)
         self.zone_ou = decay * self.zone_ou + np.sqrt(1 - decay ** 2) * self.rng.normal(size=self.zone_ou.shape)
-        return steady + turb[..., None] * self.zone_ou
+        return (steady + turb[..., None] * self.zone_ou) * self.wind_factor[:, None, None]
 
     # ------------------------------------------------------------ route helpers
     def _interp(self, s):
@@ -391,4 +400,8 @@ class MissionEnv(CargoEnv):
             n = self.past.shape[1]
             lagged = [self.past[:, (self.past_i - lag) % n] for lag in HISTORY_LAGS]
             self._obs = np.concatenate([self._obs, self.tension_peak / 10, *lagged], -1).astype(np.float32)
+        c = getattr(self, "realism", None)
+        if c is not None and (c.sensor_noise > 0 or c.sensor_bias > 0):
+            noise = self.real_rng.normal(size=self._obs.shape) * c.sensor_noise
+            self._obs = (self._obs + (self.sensor_bias + noise) * self.real_s[:, None]).astype(np.float32)
         return self._obs

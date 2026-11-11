@@ -88,6 +88,34 @@ class Conditions:
     kick_vel: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
+@dataclass(frozen=True)
+class Realism:
+    """Hardware effects the default simulator leaves out. All off by default, so
+    existing training and evaluation are unchanged. Values that vary between
+    flights are drawn once per episode from a separate random stream, so gusts
+    stay the same as without them and every policy meets the same draws.
+
+    With ``realism_random`` (training) each episode draws a strength s ~ U(0, realism_max) that
+    scales motor lag, sensor noise and bias, battery sag, motor wear, the extra wind and
+    the rope-stiffness spread; latency is drawn uniformly from 0..latency steps. Payload
+    and rope-length spreads are not scaled, as they are already uniform draws. With
+    realism_max > 1 the continuous effects go beyond the preset (latency stays 0..latency)."""
+    motor_tau: float = 0.0        # motor spin-up time constant [s]; 0 = instant thrust
+    latency: int = 0              # control steps (20 ms each) before an action takes effect
+    sensor_noise: float = 0.0     # std of white noise on every (normalised) observation
+    sensor_bias: float = 0.0      # std of a constant per-episode offset on every observation
+    battery_sag: float = 0.0      # fraction of motor thrust lost per minute of flight
+    motor_wear: float = 0.0       # each motor loses up to this fraction of efficiency
+    wind_scale: float = 1.0       # multiplies gusts and wind-zone forces
+    payload_spread: float = 0.0   # cargo mass drawn within +-this of nominal [kg]
+    rope_len_spread: float = 0.0  # rope length drawn within +-this of nominal [m]
+    rope_k_spread: float = 1.0    # rope stiffness drawn log-uniformly in [k/s, k*s]
+
+    @property
+    def active(self) -> bool:
+        return self != Realism()
+
+
 # ------------------------------------------------------------------ math helpers
 
 def _hat(v):
@@ -149,9 +177,11 @@ def formation_offsets(rope_len=ROPE_LEN, cargo_mass=CARGO_MASS):
 class CargoEnv:
     def __init__(self, num_envs: int = 1, seed: int | None = None,
                  conditions: Conditions | None = None, difficulty: float | None = None,
-                 autoreset: bool = False, max_steps: int = MAX_STEPS):
+                 autoreset: bool = False, max_steps: int = MAX_STEPS, realism: Realism | None = None,
+                 realism_random: bool = False, realism_max: float = 1.0):
         """``difficulty`` (0..1) turns on domain randomisation at every reset;
-        otherwise ``conditions`` are applied to all envs."""
+        otherwise ``conditions`` are applied to all envs. ``realism_random``: each episode
+        meets ``realism`` at a random strength (see Realism), for training."""
         self.B = num_envs
         self.rng = np.random.default_rng(seed)
         self.autoreset = autoreset
@@ -172,6 +202,15 @@ class CargoEnv:
         self.target = np.tile(TARGET, (B, 1))       # where the cargo should be (can move)
         self.tension_peak = np.zeros((B, 3))         # max rope tension within the last step
         self.set_conditions(conditions or Conditions())
+        self.rope_k = np.full(B, ROPE_K)
+        self.wear = np.ones((B, 3, 4))
+        self.motor_f = np.zeros((B, 3, 4))      # actual motor thrusts when motors lag [N]
+        self.realism = realism or Realism()
+        self.real_rng = np.random.default_rng(None if seed is None else [seed, 7919])
+        self.act_buf = np.zeros((B, self.realism.latency, N_DRONES, ACT_PER_DRONE))
+        self.realism_random, self.realism_max = realism_random, realism_max
+        self.real_s = np.ones(B)                                 # per-episode strength of the effects
+        self.latency = np.full(B, self.realism.latency)          # per-episode delay [steps]
 
     # ------------------------------------------------------------ conditions
     def set_conditions(self, c: Conditions, idx=None):
@@ -215,6 +254,8 @@ class CargoEnv:
             return self.observe()
         if self.difficulty is not None:
             self._randomize(idx)
+        if self.realism.active:
+            self._draw_realism(idx)
         r, n = self.rng, len(idx)
         noise = self.init_noise[idx][:, None]
         for j, i in enumerate(idx):
@@ -232,8 +273,30 @@ class CargoEnv:
         self.t[idx] = 0
         self.last_action[idx] = 0.0
         self.crash_code[idx] = 0
+        self.act_buf[idx] = 0.0
+        self.motor_f[idx] = ((DRONE_MASS + self.cargo_mass[idx] / N_DRONES) * G / 4)[:, None, None]
         self._ropes()
         return self.observe()
+
+    def _draw_realism(self, idx):
+        """Per-episode hardware variation (see Realism)."""
+        c, n, r = self.realism, len(idx), self.real_rng
+        if self.realism_random:
+            self.real_s[idx] = r.uniform(0, self.realism_max, n)
+            self.latency[idx] = np.minimum(np.floor(self.real_s[idx] * (c.latency + 1)), c.latency)
+        s = self.real_s[idx]
+        mass, rope = r.uniform(-1, 1, n), r.uniform(-1, 1, n)   # drawn always, so the stream is fixed
+        if c.payload_spread > 0:          # otherwise keep the mass set by conditions or training
+            self.cargo_mass[idx] = CARGO_MASS + mass * c.payload_spread
+        if c.rope_len_spread > 0:
+            self.rope_len[idx] = ROPE_LEN + rope * c.rope_len_spread
+        self.rope_k[idx] = ROPE_K * np.exp(r.uniform(-1, 1, n) * np.log(c.rope_k_spread) * s)
+        self.wear[idx] = 1.0 - r.uniform(0, c.motor_wear * s[:, None, None], (n, 3, 4))
+
+    @property
+    def wind_factor(self):
+        """Per-env multiplier on gusts and wind-zone forces, shape (B,)."""
+        return 1.0 + (self.realism.wind_scale - 1.0) * self.real_s
 
     # ------------------------------------------------------------ physics
     def _ropes(self):
@@ -242,7 +305,7 @@ class CargoEnv:
         u = d / np.maximum(dist, 1e-9)[..., None]
         ext = dist - self.rope_len[:, None]
         rate = np.sum((self.v - self.cv[:, None]) * u, -1)
-        self.tension = np.where(ext > 0, np.maximum(ROPE_K * ext + ROPE_C * rate, 0.0), 0.0)
+        self.tension = np.where(ext > 0, np.maximum(self.rope_k[:, None] * ext + ROPE_C * rate, 0.0), 0.0)
         return u
 
     def _substep(self, F_cmd, Rd, yaw_rate_cmd):
@@ -253,7 +316,12 @@ class CargoEnv:
         gyro = np.cross(w, INERTIA * w)
         tau = INERTIA * (-KR * eR - KW * (w - w_des)) + gyro
         wrench = np.concatenate([F_cmd[..., None], tau], -1)
-        f = np.clip(wrench @ UNMIX.T, 0.0, MOTOR_MAX) * self.motor_gain
+        f = np.clip(wrench @ UNMIX.T, 0.0, MOTOR_MAX) * self._gain
+        if self.realism.motor_tau > 0:
+            tau = self.realism.motor_tau * self.real_s
+            alpha = np.where(tau > 0, np.minimum(H / np.maximum(tau, 1e-12), 1.0), 1.0)
+            self.motor_f += (f - self.motor_f) * alpha[:, None, None]
+            f = self.motor_f
         self.thrust = f
         actual = f @ MIX.T
         F, tau = actual[..., 0], actual[..., 1:]
@@ -281,13 +349,24 @@ class CargoEnv:
         """Apply one 50 Hz control step of physics. Returns (clipped action, kicked mask)."""
         B = self.B
         a = np.clip(np.asarray(action, dtype=np.float64).reshape(B, N_DRONES, ACT_PER_DRONE), -1, 1)
-        F_cmd = F_HOVER_NOM * (1.0 + a[..., 0])
-        Rd = _rot(2, yaw_of(self.R)) @ _rot(1, MAX_TILT_CMD * a[..., 2]) @ _rot(0, MAX_TILT_CMD * a[..., 1])
-        yaw_rate_cmd = MAX_YAW_RATE * a[..., 3]
+        c = self.realism
+        ap = a
+        if c.latency > 0:                     # the action that takes effect now was sent `latency` steps ago
+            j = np.minimum(c.latency - self.latency, c.latency - 1)   # slot holding the action from `latency` steps ago
+            ap = np.where((self.latency > 0)[:, None, None], self.act_buf[np.arange(B), j], a)
+            self.act_buf[:, :-1] = self.act_buf[:, 1:]
+            self.act_buf[:, -1] = a
+        self._gain = self.motor_gain
+        if c.motor_wear > 0 or c.battery_sag > 0:
+            sag = np.maximum(1.0 - c.battery_sag * self.real_s * self.t * DT / 60.0, 0.0)
+            self._gain = self.motor_gain * self.wear * sag[:, None, None]
+        F_cmd = F_HOVER_NOM * (1.0 + ap[..., 0])
+        Rd = _rot(2, yaw_of(self.R)) @ _rot(1, MAX_TILT_CMD * ap[..., 2]) @ _rot(0, MAX_TILT_CMD * ap[..., 1])
+        yaw_rate_cmd = MAX_YAW_RATE * ap[..., 3]
 
         # Gusts: OU process, shared + per-body, weaker vertically.
         decay = np.exp(-DT / self.gust_tau)
-        kick = self.gust_std * np.sqrt(1 - decay ** 2)
+        kick = self.gust_std * self.wind_factor * np.sqrt(1 - decay ** 2)
         self.gust_common = decay[:, None] * self.gust_common + kick[:, None] * self.rng.normal(size=(B, 3))
         self.gust_body = decay[:, None, None] * self.gust_body + kick[:, None, None] * self.rng.normal(size=(B, 4, 3))
         g = (self.gust_common[:, None] + 0.35 * self.gust_body) * np.array([1, 1, 0.3])
