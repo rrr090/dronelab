@@ -31,6 +31,7 @@ def main(argv=None):
     p.add_argument("--per", type=int, default=10, help="maps per theme x difficulty")
     p.add_argument("--cruise", type=float, default=1.0, help="route cruise speed [m/s]")
     p.add_argument("--seed", type=int, default=EVAL_SEED)
+    p.add_argument("--env-seed", type=int, default=0, help="seed for gusts and sensor noise on the same maps")
     p.add_argument("--json", default=None)
     args = p.parse_args(argv)
 
@@ -46,12 +47,14 @@ def main(argv=None):
 
     out, results = {}, {}
     for name, pol in policies.items():
-        results[name] = run_missions(pol, maps, cruise=args.cruise)
+        results[name] = run_missions(pol, maps, cruise=args.cruise, seed=args.env_seed)
         print(f"policy: {name}")
         print(format_mission_table(results[name]) + "\n")
         out[name] = {**summarize_missions(results[name]),
-                     "per_map": [{"map_seed": int(r.map.seed), "theme": r.map.theme, "score": float(r.score),
-                                  "delivered": bool(r.delivered), "time_s": float(r.time_s)}
+                     "per_map": [{"map_seed": int(r.map.seed), "theme": r.map.theme,
+                                  "difficulty": float(r.map.difficulty), "score": float(r.score),
+                                  "delivered": bool(r.delivered), "fail_reason": r.fail_reason,
+                                  "health": float(r.health), "damage": r.damage, "time_s": float(r.time_s)}
                                  for r in results[name]]}
     baseline = results.pop("formation", None)
     if baseline is not None and results:
