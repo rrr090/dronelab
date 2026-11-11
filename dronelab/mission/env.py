@@ -41,6 +41,7 @@ HISTORY_LAGS = (5, 15, 30)   # steps back: 0.1, 0.3 and 0.6 s, against a swing p
 HISTORY_FEATURES = 9
 HISTORY_DIM = 3 + HISTORY_FEATURES * len(HISTORY_LAGS)
 JERK_WARNING = 1.5         # peak tension / T0 where the optional early penalty starts; damage starts at 2
+SPIKE_CAP = 3.0            # the optional spike penalty stops growing this far above the damage level (in T0)
 LEAD = 1.0                 # reference may run at most this far ahead of the cargo [m]
 A_LAT = 0.6                # max lateral accel in turns for the reference [m/s^2]
 A_DEC = 0.35               # braking before the goal [m/s^2]
@@ -96,15 +97,17 @@ class MissionEnv(CargoEnv):
     def __init__(self, num_envs: int = 1, seed: int | None = None, difficulty: float | None = None,
                  themes=None, maps=None, autoreset: bool = False, cruise: float | None = None,
                  conditions: Conditions | None = None, pool_size: int = 40, residual: float = 0.0,
-                 history: bool = False, jerk_weight: float = 0.0):
+                 history: bool = False, jerk_weight: float = 0.0, spike_weight: float = 0.0):
         """Training: pass ``difficulty`` (0..1) to draw random maps and conditions.
         Evaluation: pass ``maps`` (one MissionMap per env) and optionally ``conditions``.
         ``residual > 0``: actions are corrections added to the formation baseline,
         scaled by ``residual`` (see ``compose_residual``).
         ``history``: add the HISTORY_DIM inputs described at the top of this file.
-        ``jerk_weight``: penalise rope tension above JERK_WARNING, before it does damage."""
+        ``jerk_weight``: penalise rope tension above JERK_WARNING, before it does damage.
+        ``spike_weight``: quadratic penalty on tension above the damage level, capped at SPIKE_CAP,
+        because a few large peaks cause most of the rope damage."""
         self.residual = residual
-        self.history, self.jerk_weight = history, jerk_weight
+        self.history, self.jerk_weight, self.spike_weight = history, jerk_weight, spike_weight
         self.past = np.zeros((num_envs, max(HISTORY_LAGS) + 1, HISTORY_FEATURES))
         self.past_i = 0
         self._obs = None
@@ -281,6 +284,7 @@ class MissionEnv(CargoEnv):
         T0 = self.cargo_mass * G / 3 * 1.2
         jerk = 0.4 * np.sum(np.maximum(self.tension_peak / T0[:, None] - 2.0, 0), -1)
         jerk_warning = np.sum(np.maximum(self.tension_peak / T0[:, None] - JERK_WARNING, 0), -1)
+        spike = np.sum(np.clip(self.tension_peak / T0[:, None] - 2.0, 0, SPIKE_CAP) ** 2, -1)
         acc = np.linalg.norm(self.cv - self.prev_cv, axis=-1) / DT
         gforce = 0.5 * np.maximum(acc / G - 0.8, 0)
         touching = dist[:, 3] < CARGO_R
@@ -327,7 +331,7 @@ class MissionEnv(CargoEnv):
                   - 0.02 * np.mean(a.reshape(B, -1) ** 2, -1)
                   - 0.1 * np.mean((a.reshape(B, -1) - self.last_action) ** 2, -1)
                   + 1.0 * (self.s_proj - prev_s) - 3.0 * self.step_damage - 3.0 * clear_pen)
-        reward = reward - self.jerk_weight * jerk_warning
+        reward = reward - self.jerk_weight * jerk_warning - self.spike_weight * spike
         reward = reward - 30.0 * (fail > 0) + delivered * (20.0 + 80.0 * self.health / 100)
         self.last_action = a.reshape(B, -1)
         self.crash_code = fail

@@ -257,6 +257,26 @@ def env_t0():
     return CARGO_MASS * G / 3 * 1.2
 
 
+def test_spike_weight_is_quadratic_above_the_damage_level_and_capped():
+    def reward(weight, ratio):
+        env = MissionEnv(1, seed=0, maps=[M.generate_map(1, "forest", 0.3)], spike_weight=weight)
+        env.reset()
+        original = env._advance
+
+        def advance(action):
+            out = original(action)
+            env.tension_peak[:] = ratio * env_t0()
+            return out
+        env._advance = advance
+        return env.step(np.zeros((1, ACT_DIM)))[1][0]
+
+    penalty = lambda ratio: reward(0.0, ratio) - reward(1.0, ratio)
+    assert np.isclose(penalty(1.9), 0.0)                # below the damage level: unchanged
+    assert np.isclose(penalty(3.0), 3 * 1.0 ** 2)       # three ropes, one T0 above the level
+    assert np.isclose(penalty(4.0), 3 * 2.0 ** 2)
+    assert np.isclose(penalty(5.0), penalty(9.0))       # capped
+
+
 def test_saved_history_policy_flies_with_the_right_inputs(tmp_path):
     model = ActorCritic(hidden=8, obs_dim=MISSION_OBS_DIM + HISTORY_DIM, act_dim=ACT_DIM, obs_norm=True)
     path = tmp_path / "h.pt"
@@ -271,8 +291,8 @@ def test_resume_keeps_history_and_jerk_weight(tmp_path, monkeypatch):
     monkeypatch.setattr(train, "make_eval", lambda *a, **k: None)
     tiny = ["--updates", "1", "--envs", "2", "--steps", "8", "--hidden", "8", "--critic-warmup", "0"]
     first, second = str(tmp_path / "a.pt"), str(tmp_path / "b.pt")
-    train.main(tiny + ["--history", "--jerk-weight", "0.7", "--out", first])
+    train.main(tiny + ["--history", "--jerk-weight", "0.7", "--spike-weight", "0.4", "--out", first])
     train.main(tiny + ["--resume", first, "--out", second])
     ckpt = torch.load(second, map_location="cpu")
     assert ckpt["config"]["obs_dim"] == MISSION_OBS_DIM + HISTORY_DIM
-    assert ckpt["jerk_weight"] == 0.7 and ckpt["residual"] == 0.1
+    assert ckpt["jerk_weight"] == 0.7 and ckpt["residual"] == 0.1 and ckpt["spike_weight"] == 0.4

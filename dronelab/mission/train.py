@@ -25,6 +25,7 @@ Usage:
     dronelab mission train --resume checkpoints/mission_mlp.pt --updates 300
     dronelab mission train --history --jerk-weight 1.0   # past frames as inputs, early jerk penalty
     dronelab mission train --resume checkpoints/chosen.pt --curriculum 0 --critic-warmup 0 --lr 5e-5
+    dronelab mission train --resume checkpoints/chosen.pt --spike-weight 1.0 --curriculum 0 --critic-warmup 0 --lr 5e-5
 """
 from __future__ import annotations
 
@@ -135,6 +136,9 @@ def main(argv=None):
     p.add_argument("--jerk-weight", type=float, default=None,
                    help="extra penalty on rope tension approaching the damage level "
                         "(default 0, or the value saved in the --resume checkpoint)")
+    p.add_argument("--spike-weight", type=float, default=None,
+                   help="quadratic penalty on rope tension above the damage level "
+                        "(default 0, or the value saved in the --resume checkpoint)")
     args = p.parse_args(argv)
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
@@ -142,9 +146,12 @@ def main(argv=None):
         args.history = ckpt["config"]["obs_dim"] > MISSION_OBS_DIM
         if args.jerk_weight is None:
             args.jerk_weight = float(ckpt.get("jerk_weight", 0.0))
+        if args.spike_weight is None:
+            args.spike_weight = float(ckpt.get("spike_weight", 0.0))
     args.jerk_weight = args.jerk_weight or 0.0
+    args.spike_weight = args.spike_weight or 0.0
     env = MissionEnv(args.envs, seed=args.seed, difficulty=0.0, autoreset=True, residual=args.residual,
-                     history=args.history, jerk_weight=args.jerk_weight)
+                     history=args.history, jerk_weight=args.jerk_weight, spike_weight=args.spike_weight)
     if args.resume:
         init = None
     elif args.residual > 0:
@@ -155,7 +162,7 @@ def main(argv=None):
         init = None
     print(f"mode: {'residual x%.2f' % args.residual if args.residual > 0 else 'full actions'}")
     best_path = "{}_best{}".format(*os.path.splitext(args.out))
-    extra = {"jerk_weight": args.jerk_weight}
+    extra = {"jerk_weight": args.jerk_weight, "spike_weight": args.spike_weight}
     obs_dim = MISSION_OBS_DIM + (HISTORY_DIM if args.history else 0)
     train_ppo(args, env, obs_dim, ACT_DIM,
               eval_fn=make_eval(args.residual, best_path, history=args.history, extra=extra),
