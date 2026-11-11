@@ -47,13 +47,15 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
               eval_fn: Callable[[ActorCritic, torch.device], str] | None = None,
               episode_stat: Callable[[dict, int], dict] | None = None,
               model_init: Callable[[ActorCritic], None] | None = None,
-              save_extra: dict | None = None):
+              save_extra: dict | None = None, priv_dim: int = 0):
     """Train with PPO. ``env`` is a batched env with a ``difficulty`` attribute.
 
     ``eval_fn(model, device)`` returns a one-line report, run every --eval-every.
     ``episode_stat(info, i)`` extracts extra per-episode stats when env i finishes.
     ``model_init(model)`` can warm-start a fresh model (ignored with --resume).
     ``save_extra`` is stored in every checkpoint (e.g. how to interpret the actions).
+    ``priv_dim > 0``: train a separate critic that also reads ``env.privileged()``. A resumed
+    shared-body network is split first, which leaves its actions and values unchanged.
     """
     if args.threads > 0:
         torch.set_num_threads(args.threads)
@@ -65,15 +67,24 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
 
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
-        model = ActorCritic(**ckpt["config"]).to(device)
+        model = ActorCritic(**ckpt["config"])
         model.load_state_dict(ckpt["state_dict"])
+        if priv_dim and not model.priv_dim:
+            model.split_critic(priv_dim)
+            print(f"critic split off, with {priv_dim} privileged inputs")
+        if model.priv_dim != priv_dim:
+            raise ValueError(f"checkpoint has {model.priv_dim} privileged inputs, the env gives {priv_dim}")
+        model.to(device)
         print(f"resumed from {args.resume}")
     else:
         model = ActorCritic(hidden=args.hidden, obs_dim=obs_dim, act_dim=act_dim,
-                            obs_norm=True, init_log_std=-1.0).to(device)
+                            obs_norm=True, init_log_std=-1.0, priv_dim=priv_dim).to(device)
         if model_init:
             model_init(model)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
+
+    def critic_input():
+        return torch.as_tensor(env.privileged(), device=device) if priv_dim else None
 
     env.difficulty = 0.0
     obs = env.reset()
@@ -89,6 +100,7 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
             g["lr"] = args.lr * (1.0 - 0.9 * frac)
 
         b_obs = np.zeros((S, B, obs_dim), np.float32)
+        b_priv = np.zeros((S, B, priv_dim), np.float32)
         b_act = np.zeros((S, B, act_dim), np.float32)
         b_logp, b_val = np.zeros((S, B), np.float32), np.zeros((S, B), np.float32)
         b_rew, b_done = np.zeros((S, B), np.float32), np.zeros((S, B), np.float32)
@@ -96,8 +108,11 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
         model.eval()
         for t in range(S):
             b_obs[t] = obs
+            priv = critic_input()
+            if priv_dim:
+                b_priv[t] = priv.cpu().numpy()
             with torch.no_grad():
-                a, logp, v = model.act(torch.as_tensor(obs, device=device))
+                a, logp, v = model.act(torch.as_tensor(obs, device=device), priv)
             a = a.cpu().numpy()
             obs, r, term, trunc, info = env.step(a)
             done = term | trunc
@@ -112,7 +127,7 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
         model.train()
 
         with torch.no_grad():
-            last_v = model(torch.as_tensor(obs, device=device))[2].cpu().numpy()
+            last_v = model(torch.as_tensor(obs, device=device), critic_input())[2].cpu().numpy()
         adv = np.zeros((S, B), np.float32)
         last = np.zeros(B, np.float32)
         for t in reversed(range(S)):
@@ -125,7 +140,8 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
 
         T = lambda x: torch.as_tensor(x.reshape(S * B, *x.shape[2:]), device=device)
         o_t, a_t, lp_t, adv_t, ret_t = T(b_obs), T(b_act), T(b_logp), T(adv), T(ret)
-        model.update_obs_stats(o_t)
+        p_t = T(b_priv) if priv_dim else None
+        model.update_obs_stats(o_t, p_t)
         adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
 
         n = S * B
@@ -133,7 +149,7 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
             perm = torch.as_tensor(rng.permutation(n), device=device)
             for s in range(0, n, args.minibatch):
                 mb = perm[s:s + args.minibatch]
-                logp, ent, value = model.evaluate(o_t[mb], a_t[mb])
+                logp, ent, value = model.evaluate(o_t[mb], a_t[mb], p_t[mb] if priv_dim else None)
                 ratio = (logp - lp_t[mb]).exp()
                 pg = torch.max(-adv_t[mb] * ratio, -adv_t[mb] * ratio.clamp(0.8, 1.2)).mean()
                 v_loss = 0.5 * (value - ret_t[mb]).pow(2).mean()
@@ -143,7 +159,8 @@ def train_ppo(args, env, obs_dim: int, act_dim: int,
                     loss = pg + 0.5 * v_loss - args.ent_coef * ent.mean()
                 opt.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                for params in model.grad_groups():
+                    torch.nn.utils.clip_grad_norm_(params, 0.5)
                 opt.step()
 
         if update % 5 == 0 or update == 1:

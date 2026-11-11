@@ -26,6 +26,7 @@ Usage:
     dronelab mission train --history --jerk-weight 1.0   # past frames as inputs, early jerk penalty
     dronelab mission train --resume checkpoints/chosen.pt --curriculum 0 --critic-warmup 0 --lr 5e-5
     dronelab mission train --resume checkpoints/chosen.pt --spike-weight 1.0 --curriculum 0 --critic-warmup 0 --lr 5e-5
+    dronelab mission train --resume checkpoints/chosen.pt --privileged --curriculum 0 --critic-warmup 10 --lr 5e-5
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ import numpy as np
 import torch
 
 from dronelab.cargo.env import ACT_DIM
-from dronelab.mission.env import HISTORY_DIM, MISSION_OBS_DIM, MissionEnv, compose_residual
+from dronelab.mission.env import HISTORY_DIM, MISSION_OBS_DIM, PRIV_DIM, MissionEnv, compose_residual
 from dronelab.mission.testing import mission_maps, run_missions, summarize_missions
 from dronelab.ppo import add_ppo_args, save, train_ppo
 
@@ -139,11 +140,15 @@ def main(argv=None):
     p.add_argument("--spike-weight", type=float, default=None,
                    help="quadratic penalty on rope tension above the damage level "
                         "(default 0, or the value saved in the --resume checkpoint)")
+    p.add_argument("--privileged", action="store_true",
+                   help="give the critic its own network with wind, gust and cargo state; "
+                        "the policy's inputs do not change")
     args = p.parse_args(argv)
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
         args.residual = float(ckpt.get("residual", 0.0))
         args.history = ckpt["config"]["obs_dim"] > MISSION_OBS_DIM
+        args.privileged = args.privileged or ckpt["config"].get("priv_dim", 0) > 0
         if args.jerk_weight is None:
             args.jerk_weight = float(ckpt.get("jerk_weight", 0.0))
         if args.spike_weight is None:
@@ -167,7 +172,8 @@ def main(argv=None):
     train_ppo(args, env, obs_dim, ACT_DIM,
               eval_fn=make_eval(args.residual, best_path, history=args.history, extra=extra),
               episode_stat=episode_stat, model_init=init,
-              save_extra={"residual": args.residual, **extra})
+              save_extra={"residual": args.residual, **extra},
+              priv_dim=PRIV_DIM if args.privileged else 0)
 
 
 if __name__ == "__main__":

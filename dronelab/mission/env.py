@@ -41,6 +41,7 @@ HISTORY_LAGS = (5, 15, 30)   # steps back: 0.1, 0.3 and 0.6 s, against a swing p
 HISTORY_FEATURES = 9
 HISTORY_DIM = 3 + HISTORY_FEATURES * len(HISTORY_LAGS)
 JERK_WARNING = 1.5         # peak tension / T0 where the optional early penalty starts; damage starts at 2
+PRIV_DIM = 63              # size of MissionEnv.privileged()
 SPIKE_CAP = 3.0            # the optional spike penalty stops growing this far above the damage level (in T0)
 LEAD = 1.0                 # reference may run at most this far ahead of the cargo [m]
 A_LAT = 0.6                # max lateral accel in turns for the reference [m/s^2]
@@ -355,6 +356,21 @@ class MissionEnv(CargoEnv):
         dist, grad = self._sense(bodies)
         mid = self.cp[:, None] + 0.5 * (self.p - self.cp[:, None])
         return dist, grad, M.sdf(mid, self.cyl_l, self.box_l)
+
+    # ------------------------------------------------------------ critic-only state
+    def privileged(self):
+        """What the simulator knows and the policy does not, for a training critic (B, PRIV_DIM):
+        gust and turbulence states, the forces they apply now, the wind zones 2 and 4 m further along
+        the route, and this episode's gust settings, cargo mass, rope length and motor wear."""
+        B = self.B
+        ahead = [self._interp(np.minimum(self.s_ref + k, self.path_len))[0] for k in (2.0, 4.0)]
+        steady, turb = M.zone_wind(np.stack(ahead, 1), self.zones)
+        return np.concatenate([
+            self.gust_common, self.gust_body.reshape(B, -1), self.zone_ou.reshape(B, -1),
+            self.drone_force.reshape(B, -1), self.cargo_force, steady.reshape(B, -1), turb,
+            self.gust_std[:, None], self.gust_tau[:, None], self.cargo_mass[:, None],
+            self.rope_len[:, None], self.motor_gain.reshape(B, -1),
+        ], -1).astype(np.float32)
 
     # ------------------------------------------------------------ observation
     def observe(self):

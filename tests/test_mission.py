@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from dronelab.mission import maps as M
 from dronelab.cargo.env import ACT_DIM, CARGO_MASS, G
 from dronelab.mission.env import (
-    HISTORY_DIM, HISTORY_FEATURES, HISTORY_LAGS, JERK_WARNING, MISSION_OBS_DIM, MissionEnv,
+    HISTORY_DIM, HISTORY_FEATURES, HISTORY_LAGS, JERK_WARNING, MISSION_OBS_DIM, PRIV_DIM, MissionEnv,
 )
 from dronelab.mission.testing import (
     MissionFormationController, MissionResult, bootstrap_ci, compare_to_baseline, load_mission_policy,
@@ -296,3 +296,52 @@ def test_resume_keeps_history_and_jerk_weight(tmp_path, monkeypatch):
     ckpt = torch.load(second, map_location="cpu")
     assert ckpt["config"]["obs_dim"] == MISSION_OBS_DIM + HISTORY_DIM
     assert ckpt["jerk_weight"] == 0.7 and ckpt["residual"] == 0.1 and ckpt["spike_weight"] == 0.4
+
+
+def test_splitting_the_critic_keeps_actions_and_values_exactly():
+    model = ActorCritic(hidden=16, obs_dim=MISSION_OBS_DIM, act_dim=ACT_DIM, obs_norm=True)
+    obs = torch.randn(32, MISSION_OBS_DIM)
+    mean, std, value = model(obs)
+    model.split_critic(PRIV_DIM)
+    new_mean, new_std, new_value = model(obs, 5 * torch.randn(32, PRIV_DIM))
+    assert torch.equal(mean, new_mean) and torch.equal(std, new_std) and torch.equal(value, new_value)
+    assert model(obs)[2] is None
+
+
+def test_separate_actor_and_critic_learn_only_from_their_own_loss():
+    model = ActorCritic(hidden=16, obs_dim=MISSION_OBS_DIM, act_dim=ACT_DIM, obs_norm=True, priv_dim=PRIV_DIM)
+    actor, critic = model.grad_groups()
+    obs, priv = torch.randn(8, MISSION_OBS_DIM), torch.randn(8, PRIV_DIM)
+    mean, _, value = model(obs, priv)
+    grads = torch.autograd.grad(mean.sum(), actor + critic, retain_graph=True, allow_unused=True)
+    assert all(g is None for g in grads[len(actor):]) and any(g is not None for g in grads[:len(actor)])
+    grads = torch.autograd.grad(value.sum(), actor + critic, allow_unused=True)
+    assert all(g is None for g in grads[:len(actor)]) and all(g is not None for g in grads[len(actor):])
+
+
+def test_privileged_state_reports_hidden_conditions_without_touching_the_episode():
+    env = MissionEnv(2, seed=3, maps=[M.generate_map(4, "storm", 1.0) for _ in range(2)], history=True)
+    env.reset()
+    env.step(np.zeros((2, ACT_DIM)))
+    obs, rng_state = env.observe().copy(), env.rng.bit_generator.state
+    priv = env.privileged()
+    assert priv.shape == (2, PRIV_DIM) and np.isfinite(priv).all()
+    assert np.array_equal(env.observe(), obs) and env.rng.bit_generator.state == rng_state
+    assert np.allclose(priv[:, :3], env.gust_common) and np.allclose(priv[:, -12:], env.motor_gain.reshape(2, -1))
+    assert np.allclose(priv[:, -14], env.cargo_mass) and np.allclose(priv[:, -13], env.rope_len)
+
+
+def test_privileged_training_splits_a_saved_policy_and_it_still_flies(tmp_path, monkeypatch):
+    from dronelab.mission import train
+    monkeypatch.setattr(train, "make_eval", lambda *a, **k: None)
+    tiny = ["--updates", "1", "--envs", "2", "--steps", "8", "--hidden", "8", "--critic-warmup", "1"]
+    first, second, third = (str(tmp_path / n) for n in ("a.pt", "b.pt", "c.pt"))
+    train.main(tiny + ["--history", "--out", first])
+    train.main(tiny + ["--resume", first, "--privileged", "--out", second])
+    train.main(tiny + ["--resume", second, "--out", third])
+    a, b, c = (torch.load(p, map_location="cpu") for p in (first, second, third))
+    assert b["config"]["priv_dim"] == PRIV_DIM and c["config"]["priv_dim"] == PRIV_DIM
+    for key in ("body.0.weight", "body.2.weight", "actor_mean.weight", "actor_log_std"):
+        assert torch.equal(a["state_dict"][key], b["state_dict"][key])   # warm-up moved only the critic
+    policy = load_mission_policy(third)
+    assert policy.history and run_missions(policy, [M.generate_map(9, "storm", 0.0)])[0].steps > 0
